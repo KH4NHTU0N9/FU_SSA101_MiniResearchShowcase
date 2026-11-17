@@ -36,6 +36,7 @@ export function isAllowedBlobUrl(rawUrl: string): boolean {
         if (parsed.username || parsed.password) return false;
 
         const host = parsed.hostname.toLowerCase();
+        if (host === "public.blob.vercel-storage.com") return false;
         return ALLOWED_BLOB_HOST_SUFFIXES.some(
             (suffix) => host.endsWith(suffix) && host.length > suffix.length
         );
