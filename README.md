@@ -1,22 +1,31 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# FPT Psychology Support & Study Hub (`FU_SSA101`)
 
-## Getting Started
+A full-stack Next.js 16 student wellness and academic support platform featuring DASS-21 self-assessments, mood/energy tracking, bilingual EN/VN support, an AI support companion, anonymous peer community board, exam materials library with Vercel Blob storage, flashcard study studio, smart weekly scheduler, relaxation toolkit, and interactive CompArch Lab.
 
-First, run the development server:
+## Quick Start
 
 ```bash
+cp .env.example .env.local
+# Fill in DATABASE_URL, JWT_SECRET (>=32 chars), SMTP_*, CHAT_API_KEY, GEMINI_API_KEY, BLOB_READ_WRITE_TOKEN
+
+npm install
+npx prisma generate
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Available Scripts
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start Next.js development server |
+| `npm run build` | Build production application |
+| `npm start` | Serve production build |
+| `npm run typecheck` | Run TypeScript (`tsc --noEmit`) |
+| `npm run lint` | Run ESLint across workspace |
+| `npm test` | Run full Vitest unit, API, E2E, security, and UI test suites |
 
+## Further Documentation
 
-# FPTU_SSA101_PROJECT
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — Application modules, domain logic, and database models
+- [SECURITY.md](./SECURITY.md) — Authentication, CSRF, SSRF, CSP, and rate-limiting guarantees
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — Development setup and quality checks
