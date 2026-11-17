@@ -1,43 +1,43 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { handlePrismaError, requireAuth } from "@/lib/api/response";
 
-// GET: Fetch all scheduler data (FixedEvents + Tasks)
 export async function GET() {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth();
+        if (auth.error) return auth.error;
 
         const [fixedEvents, tasks] = await Promise.all([
-            prisma.fixedEvent.findMany({ where: { userId: session.user.id } }),
-            prisma.task.findMany({ where: { userId: session.user.id } })
+            prisma.fixedEvent.findMany({
+                where: { userId: auth.ctx.user.id },
+                orderBy: { createdAt: "asc" },
+            }),
+            prisma.task.findMany({
+                where: { userId: auth.ctx.user.id },
+                orderBy: { createdAt: "asc" },
+            }),
         ]);
 
         return NextResponse.json({ fixedEvents, tasks });
-    } catch {
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (error) {
+        return handlePrismaError(error, "scheduler GET");
     }
 }
 
-// DELETE: Clear all scheduler data for user (Reset)
-export async function DELETE() {
+export async function DELETE(req: Request) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
         await prisma.$transaction([
-            prisma.task.deleteMany({ where: { userId: session.user.id } }),
-            prisma.fixedEvent.deleteMany({ where: { userId: session.user.id } })
+            prisma.task.deleteMany({ where: { userId: auth.ctx.user.id } }),
+            prisma.fixedEvent.deleteMany({ where: { userId: auth.ctx.user.id } }),
         ]);
 
         return NextResponse.json({ success: true });
-    } catch {
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (error) {
+        return handlePrismaError(error, "scheduler DELETE");
     }
 }
