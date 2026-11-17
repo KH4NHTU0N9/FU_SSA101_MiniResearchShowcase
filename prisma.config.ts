@@ -7,17 +7,20 @@ config();
 
 const databaseUrl = process.env.DATABASE_URL;
 
-export default defineConfig({
-  schema: "prisma/schema.prisma",
-  migrations: {
-    path: "prisma/migrations",
-  },
-  ...(databaseUrl
-    ? {
-        engine: "classic" as const,
-        datasource: {
-          url: databaseUrl,
-        },
-      }
-    : {}),
-});
+export default databaseUrl
+  ? defineConfig({
+      schema: "prisma/schema.prisma",
+      migrations: {
+        path: "prisma/migrations",
+      },
+      engine: "classic",
+      datasource: {
+        url: databaseUrl,
+      },
+    })
+  : defineConfig({
+      schema: "prisma/schema.prisma",
+      migrations: {
+        path: "prisma/migrations",
+      },
+    });
