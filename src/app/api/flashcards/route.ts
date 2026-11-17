@@ -1,57 +1,47 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { handlePrismaError, parseJsonBody, requireAuth } from "@/lib/api/response";
+import { createDeckSchema } from "@/lib/validation";
 
-// GET: Fetch all decks for user
 export async function GET() {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth();
+        if (auth.error) return auth.error;
 
         const decks = await prisma.flashcardDeck.findMany({
-            where: { userId: session.user.id },
-            include: { cards: true },
-            orderBy: { createdAt: 'desc' }
+            where: { userId: auth.ctx.user.id },
+            include: { cards: { orderBy: { createdAt: "asc" } } },
+            orderBy: { createdAt: "desc" },
         });
 
         return NextResponse.json(decks);
-    } catch {
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (error) {
+        return handlePrismaError(error, "flashcards GET");
     }
 }
 
-// POST: Create a new deck
 export async function POST(req: Request) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
-        const { title, description, color } = await req.json();
-
-        if (!title || !color) {
-            return NextResponse.json({ error: "Missing fields" }, { status: 400 });
-        }
+        const parsed = await parseJsonBody(req, createDeckSchema);
+        if (parsed.error) return parsed.error;
 
         const deck = await prisma.flashcardDeck.create({
             data: {
-                userId: session.user.id,
-                title,
-                description,
-                color
+                userId: auth.ctx.user.id,
+                title: parsed.data.title,
+                description: parsed.data.description || null,
+                color: parsed.data.color,
             },
-            include: { cards: true }
+            include: { cards: true },
         });
 
-        return NextResponse.json(deck);
-
+        return NextResponse.json(deck, { status: 201 });
     } catch (error) {
-        console.error("Create Deck Error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "flashcards POST");
     }
 }
