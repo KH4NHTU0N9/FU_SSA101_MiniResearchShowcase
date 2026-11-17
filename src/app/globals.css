@@ -3,9 +3,7 @@
 :root {
   /* Light Mode - Calm & Airy */
   --background: 210 40% 98%;
-  /* #F8FAFC */
   --foreground: 222 47% 11%;
-  /* #0F172A */
 
   --card: 0 0% 100%;
   --card-foreground: 222 47% 11%;
@@ -14,18 +12,15 @@
   --popover-foreground: 222 47% 11%;
 
   --primary: 199 89% 48%;
-  /* Sky 500 */
   --primary-foreground: 210 40% 98%;
 
   --secondary: 173 80% 40%;
-  /* Teal 600 */
   --secondary-foreground: 210 40% 98%;
 
   --muted: 210 40% 96.1%;
   --muted-foreground: 215.4 16.3% 46.9%;
 
   --accent: 199 89% 96%;
-  /* Sky 50 */
   --accent-foreground: 222 47% 11%;
 
   --destructive: 0 84.2% 60.2%;
@@ -42,7 +37,6 @@
   :root {
     /* Dark Mode - Deep Ocean */
     --background: 222 47% 11%;
-    /* #0F172A */
     --foreground: 210 40% 98%;
 
     --card: 222 47% 11%;
@@ -108,6 +102,37 @@
   }
 }
 
+@keyframes gradient-x {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes bounce-subtle {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes enter-fade-slide {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @layer components {
   .glass-card {
     @apply bg-black/5 dark:bg-black/20 backdrop-blur-lg border border-black/10 dark:border-white/10 shadow-xl;
@@ -115,5 +140,31 @@
 
   .glass-button {
     @apply bg-black/10 dark:bg-white/10 backdrop-blur-md hover:bg-black/20 dark:hover:bg-white/20 transition-all border border-black/10 dark:border-white/20;
+  }
+
+  .filled-icon {
+    fill: currentColor;
+  }
+
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .animate-gradient-x {
+    background-size: 200% 200%;
+    animation: gradient-x 6s ease infinite;
+  }
+
+  .animate-bounce-subtle {
+    animation: bounce-subtle 2.5s ease-in-out infinite;
+  }
+
+  .animate-in {
+    animation: enter-fade-slide 0.3s ease-out both;
   }
 }
