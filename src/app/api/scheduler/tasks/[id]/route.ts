@@ -1,75 +1,86 @@
-export const dynamic = 'force-dynamic';
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+export const dynamic = "force-dynamic";
+
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { handlePrismaError, jsonError, parseJsonBody, requireAuth } from "@/lib/api/response";
+import { patchTaskSchema } from "@/lib/validation";
 
 export async function DELETE(
     req: Request,
     { params }: { params: Promise<{ id: string }> }
 ) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
-        const resolvedParams = await params;
-        const taskId = resolvedParams.id;
+        const { id } = await params;
 
-        // Find the task first to check if it has a groupId
         const task = await prisma.task.findUnique({
-            where: { id: taskId, userId: session.user.id }
+            where: { id },
+            select: { id: true, userId: true, groupId: true },
         });
 
         if (!task) {
-            return NextResponse.json({ error: "Task not found" }, { status: 404 });
+            return jsonError("Task not found", 404);
         }
 
-        // If it has a groupId, delete all tasks with that groupId
+        if (task.userId !== auth.ctx.user.id) {
+            return jsonError("Forbidden", 403);
+        }
+
         if (task.groupId) {
             await prisma.task.deleteMany({
                 where: {
-                    userId: session.user.id,
-                    groupId: task.groupId
-                }
+                    userId: auth.ctx.user.id,
+                    groupId: task.groupId,
+                },
             });
         } else {
-            // Otherwise just delete the single task
-            await prisma.task.delete({
-                where: { id: taskId, userId: session.user.id }
-            });
+            await prisma.task.delete({ where: { id } });
         }
 
         return NextResponse.json({ success: true });
     } catch (error) {
-        console.error("Delete task error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "scheduler/tasks DELETE");
     }
 }
 
-// PATCH: Update single task (used for drag and drop)
 export async function PATCH(
     req: Request,
     { params }: { params: Promise<{ id: string }> }
 ) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
+
+        const { id } = await params;
+
+        const parsed = await parseJsonBody(req, patchTaskSchema);
+        if (parsed.error) return parsed.error;
+
+        const existing = await prisma.task.findUnique({
+            where: { id },
+            select: { id: true, userId: true },
+        });
+
+        if (!existing) {
+            return jsonError("Task not found", 404);
         }
 
-        const resolvedParams = await params;
-        const taskId = resolvedParams.id;
-        const { scheduledDay, scheduledStartTime } = await req.json();
+        if (existing.userId !== auth.ctx.user.id) {
+            return jsonError("Forbidden", 403);
+        }
 
         const updatedTask = await prisma.task.update({
-            where: { id: taskId, userId: session.user.id },
-            data: { scheduledDay, scheduledStartTime }
+            where: { id },
+            data: {
+                scheduledDay: parsed.data.scheduledDay,
+                scheduledStartTime: parsed.data.scheduledStartTime,
+            },
         });
 
         return NextResponse.json(updatedTask);
     } catch (error) {
-        console.error("Update task error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "scheduler/tasks PATCH");
     }
 }
