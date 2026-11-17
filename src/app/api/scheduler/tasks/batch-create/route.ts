@@ -1,56 +1,38 @@
-export const dynamic = 'force-dynamic';
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
-import { prisma } from "@/lib/prisma";
+export const dynamic = "force-dynamic";
 
-// POST: Create Multiple Tasks
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { handlePrismaError, parseJsonBody, requireAuth } from "@/lib/api/response";
+import { batchCreateTasksSchema } from "@/lib/validation";
+
 export async function POST(req: Request) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
-        const { tasks } = await req.json();
+        const parsed = await parseJsonBody(req, batchCreateTasksSchema);
+        if (parsed.error) return parsed.error;
 
-        if (!Array.isArray(tasks) || tasks.length === 0) {
-            return NextResponse.json({ error: "Invalid tasks payload" }, { status: 400 });
-        }
+        const userId = auth.ctx.user.id;
+        const { tasks } = parsed.data;
 
-        const userId = session.user.id;
-        const groupId = tasks[0]?.groupId; // Assuming they all share the same groupId if they are an everyday task
+        const createdTasks = await prisma.$transaction(
+            tasks.map((t) =>
+                prisma.task.create({
+                    data: {
+                        userId,
+                        name: t.name,
+                        duration: t.duration,
+                        scheduledDay: t.scheduledDay ?? null,
+                        scheduledStartTime: t.scheduledStartTime ?? null,
+                        groupId: t.groupId ?? null,
+                    },
+                })
+            )
+        );
 
-        // Insert all tasks in a single query
-        await prisma.task.createMany({
-            data: tasks.map(t => ({
-                userId,
-                name: t.name,
-                duration: t.duration,
-                scheduledDay: t.scheduledDay,
-                scheduledStartTime: t.scheduledStartTime,
-                groupId: t.groupId
-            }))
-        });
-
-        // Since createMany doesn't return the inserted records (only the count),
-        // we'll fetch them back using the groupId to get their generated IDs
-        let createdTasks = [];
-        if (groupId) {
-            createdTasks = await prisma.task.findMany({
-                where: { userId, groupId }
-            });
-        } else {
-            // Fallback if no groupId was provided (though for Everyday tasks there always should be)
-            createdTasks = await prisma.task.findMany({
-                where: { userId },
-                orderBy: { createdAt: 'desc' },
-                take: tasks.length
-            });
-        }
-
-        return NextResponse.json(createdTasks);
+        return NextResponse.json(createdTasks, { status: 201 });
     } catch (error) {
-        console.error("Batch create tasks error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "scheduler/tasks/batch-create POST");
     }
 }
