@@ -1,34 +1,72 @@
-export const dynamic = 'force-dynamic';
-import { NextRequest, NextResponse } from "next/server";
-import { setSession } from "@/lib/session";
+export const dynamic = "force-dynamic";
+
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import bcrypt from "bcryptjs";
+import { setSession } from "@/lib/session";
+import {
+    guardOrigin,
+    guardRateLimit,
+    handlePrismaError,
+    jsonError,
+    parseJsonBody,
+} from "@/lib/api/response";
+import { verifyPassword } from "@/lib/security";
+import { loginSchema } from "@/lib/validation";
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
     try {
-        const { identifier, password } = await req.json();
+        const originError = guardOrigin(req);
+        if (originError) return originError;
 
-        // Find user by email
-        const user = await prisma.user.findUnique({
-            where: { email: identifier }
+        const rateError = guardRateLimit(req, "auth:login", {
+            windowMs: 15 * 60 * 1000,
+            maxRequests: 20,
+        });
+        if (rateError) return rateError;
+
+        const parsed = await parseJsonBody(req, loginSchema);
+        if (parsed.error) return parsed.error;
+
+        const { identifier, password } = parsed.data;
+        const isEmail = identifier.includes("@");
+        const normalizedEmail = isEmail ? identifier.toLowerCase() : null;
+        const normalizedPhone = !isEmail ? identifier.replace(/[\s\-().]+/g, "") : null;
+
+        const user = await prisma.user.findFirst({
+            where: normalizedEmail
+                ? { email: normalizedEmail }
+                : { phone: normalizedPhone ?? "" },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                phone: true,
+                password: true,
+                tokenVersion: true,
+            },
         });
 
-        if (!user) {
-            return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+        const isValid = await verifyPassword(password, user?.password);
+        if (!user || !isValid) {
+            return jsonError("Invalid credentials", 401);
         }
 
-        // Verify password
-        const isValid = await bcrypt.compare(password, user.password);
+        await setSession({
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            tokenVersion: user.tokenVersion,
+        });
 
-        if (!isValid) {
-            return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
-        }
-
-        await setSession({ id: user.id, email: user.email, name: user.name });
-
-        return NextResponse.json({ user: { id: user.id, name: user.name, email: user.email } });
+        return NextResponse.json({
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                phone: user.phone,
+            },
+        });
     } catch (error) {
-        console.error("Login Error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "auth/login POST");
     }
 }
