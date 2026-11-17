@@ -10,14 +10,20 @@ export default function ProtectedRoute({ children }: { children: React.ReactNode
 
     useEffect(() => {
         if (!loading && !isAuthenticated) {
-            router.push("/login"); // Redirect to login if not authenticated
+            router.replace("/login");
         }
     }, [isAuthenticated, loading, router]);
 
-    // If loading, show nothing or spinner. 
-    // If not authenticated, we return null until the redirect happens.
     if (loading) {
-        return <div className="min-h-screen flex items-center justify-center">Loading...</div>; // Or a proper spinner component
+        return (
+            <div
+                role="status"
+                aria-live="polite"
+                className="min-h-screen flex items-center justify-center"
+            >
+                <span className="text-sm text-muted-foreground animate-pulse">Loading...</span>
+            </div>
+        );
     }
 
     if (!isAuthenticated) {
