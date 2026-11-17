@@ -1,15 +1,29 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { guardRateLimit } from "@/lib/api/response";
+
+export async function GET(req: Request) {
+    const rateError = guardRateLimit(req, "system:keepalive", {
+        windowMs: 60 * 1000,
+        maxRequests: 15,
+    });
+    if (rateError) return rateError;
+
+    const noStore = { "Cache-Control": "no-store" };
+
     try {
-        // A super lightweight query just to wake up the database
         await prisma.$queryRaw`SELECT 1`;
-        return NextResponse.json({ status: "ok", message: "Database is warm" }, { status: 200 });
+        return NextResponse.json(
+            { status: "ok", message: "Database is warm" },
+            { status: 200, headers: noStore }
+        );
     } catch (error) {
-        console.error("Keepalive Error:", error);
-        return NextResponse.json({ status: "error", message: "Failed to connect" }, { status: 500 });
+        console.error("[keepalive GET]", error);
+        return NextResponse.json(
+            { status: "error", message: "Database unavailable" },
+            { status: 503, headers: noStore }
+        );
     }
 }
