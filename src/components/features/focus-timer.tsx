@@ -1,13 +1,55 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+    AlertCircle,
+    Lock,
+    Music,
+    Pause,
+    Play,
+    RotateCcw,
+    Unlock,
+    Volume2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { Play, Pause, RotateCcw, Lock, Unlock, Music, Volume2, AlertCircle } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 
+const SOUNDS = [
+    {
+        id: "rain",
+        label: "Rain",
+        url: "https://actions.google.com/sounds/v1/weather/rain_heavy_loud.ogg",
+    },
+    {
+        id: "cafe",
+        label: "Cafe",
+        url: "https://actions.google.com/sounds/v1/ambiences/coffee_shop.ogg",
+    },
+    {
+        id: "waves",
+        label: "Waves",
+        url: "https://actions.google.com/sounds/v1/water/waves_crashing_on_rock_beach.ogg",
+    },
+] as const;
+
+function getModeDurationSeconds(mode: "focus" | "shortBreak" | "longBreak"): number {
+    if (mode === "focus") return 25 * 60;
+    if (mode === "shortBreak") return 5 * 60;
+    return 15 * 60;
+}
+
+function formatTime(seconds: number): string {
+    const safe = Math.max(0, seconds);
+    const mins = Math.floor(safe / 60);
+    const secs = safe % 60;
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+}
+
 export function FocusTimer() {
+    const { showToast } = useToast();
     const [timeLeft, setTimeLeft] = useState(25 * 60);
     const [isActive, setIsActive] = useState(false);
     const [mode, setMode] = useState<"focus" | "shortBreak" | "longBreak">("focus");
@@ -21,32 +63,56 @@ export function FocusTimer() {
     const [customMinutes, setCustomMinutes] = useState(30);
 
     const audioRef = useRef<HTMLAudioElement | null>(null);
+    const completedFlagRef = useRef(false);
 
-    // Timer Logic
     useEffect(() => {
-        let interval: NodeJS.Timeout;
+        if (!isActive) return;
 
-        if (isActive && timeLeft > 0) {
-            interval = setInterval(() => {
-                setTimeLeft((prev) => prev - 1);
-            }, 1000);
-        } else if (timeLeft === 0) {
-            setIsActive(false);
-            const audio = new Audio("https://actions.google.com/sounds/v1/alarms/beep_short.ogg");
-            audio.play().catch(console.error);
-        }
+        const interval = setInterval(() => {
+            setTimeLeft((prev) => {
+                if (prev <= 1) {
+                    completedFlagRef.current = true;
+                    setIsActive(false);
+                    return 0;
+                }
+                return prev - 1;
+            });
+        }, 1000);
 
         return () => clearInterval(interval);
-    }, [isActive, timeLeft]);
+    }, [isActive]);
 
-    // Audio Control Logic
     useEffect(() => {
-        if (audioRef.current) {
-            if (ambient) {
-                audioRef.current.play().catch(console.error);
-            } else {
-                audioRef.current.pause();
+        if (!isActive && timeLeft === 0 && completedFlagRef.current) {
+            completedFlagRef.current = false;
+            const audio = new Audio(
+                "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
+            );
+            audio.play().catch(() => {});
+            showToast("Focus session complete!", "success");
+        }
+    }, [isActive, timeLeft, showToast]);
+
+    useEffect(() => {
+        if (!isStrict || !isActive) return;
+
+        const handleVisibility = () => {
+            if (document.hidden) {
+                setIsActive(false);
+                showToast("Strict Mode paused your timer because you switched tabs.", "info");
             }
+        };
+
+        document.addEventListener("visibilitychange", handleVisibility);
+        return () => document.removeEventListener("visibilitychange", handleVisibility);
+    }, [isStrict, isActive, showToast]);
+
+    useEffect(() => {
+        if (!audioRef.current) return;
+        if (ambient) {
+            audioRef.current.play().catch(() => {});
+        } else {
+            audioRef.current.pause();
         }
     }, [ambient]);
 
@@ -56,208 +122,234 @@ export function FocusTimer() {
         }
     }, [volume]);
 
+    useEffect(() => {
+        if (isActive) {
+            document.title = `(${formatTime(timeLeft)}) Focus Mode`;
+        } else {
+            document.title = "FPT Psychology Support | Focus";
+        }
+        return () => {
+            document.title = "FPT Psychology Support";
+        };
+    }, [timeLeft, isActive]);
+
     const toggleTimer = () => {
         if (!task.trim() && !isActive) {
-            return alert("Please enter a task first!");
+            showToast("Please enter a focus objective first.", "info");
+            return;
+        }
+        if (timeLeft <= 0) {
+            resetTimer();
         }
         if (isEditingTask) setIsEditingTask(false);
-        setIsActive(!isActive);
+        setIsActive((prev) => !prev);
     };
 
     const resetTimer = () => {
         setIsActive(false);
+        completedFlagRef.current = false;
         if (timerType === "pomodoro") {
-            setTimeLeft(mode === "focus" ? 25 * 60 : mode === "shortBreak" ? 5 * 60 : 15 * 60);
+            setTimeLeft(getModeDurationSeconds(mode));
         } else {
-            setTimeLeft(customMinutes * 60);
+            setTimeLeft(Math.max(1, customMinutes) * 60);
         }
     };
 
     const changeMode = (newMode: typeof mode) => {
         setMode(newMode);
         setIsActive(false);
-        setTimeLeft(newMode === "focus" ? 25 * 60 : newMode === "shortBreak" ? 5 * 60 : 15 * 60);
+        completedFlagRef.current = false;
+        setTimeLeft(getModeDurationSeconds(newMode));
     };
 
-    // Handle Custom Time Change
     const handleCustomTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const val = parseInt(e.target.value) || 0;
-        setCustomMinutes(val);
+        const parsed = parseInt(e.target.value, 10);
+        const clamped = Number.isNaN(parsed) ? 1 : Math.max(1, Math.min(180, parsed));
+        setCustomMinutes(clamped);
         if (!isActive) {
-            setTimeLeft(val * 60);
+            completedFlagRef.current = false;
+            setTimeLeft(clamped * 60);
         }
     };
 
-    const formatTime = (seconds: number) => {
-        const mins = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-    };
-
-    const sounds = [
-        { id: "rain", label: "Rain 🌧️", url: "https://actions.google.com/sounds/v1/weather/rain_heavy_loud.ogg" },
-        { id: "cafe", label: "Cafe ☕", url: "https://actions.google.com/sounds/v1/ambiences/coffee_shop.ogg" },
-        { id: "waves", label: "Waves 🌊", url: "https://actions.google.com/sounds/v1/water/waves_crashing_on_rock_beach.ogg" },
-    ];
-
-    // Update Browser Title (Taskbar)
-    useEffect(() => {
-        if (isActive) {
-            document.title = `(${formatTime(timeLeft)}) Focus Mode`;
-        } else {
-            document.title = "CHATGPT Team Support | Focus";
+    const toggleStrictMode = () => {
+        if (isActive) return;
+        const nextStrict = !isStrict;
+        setIsStrict(nextStrict);
+        if (nextStrict) {
+            document.documentElement.requestFullscreen?.().catch(() => {});
+        } else if (document.fullscreenElement) {
+            document.exitFullscreen?.().catch(() => {});
         }
-        return () => {
-            document.title = "CHATGPT Team Support";
-        };
-    }, [timeLeft, isActive]);
+    };
 
     return (
-        <div className="flex flex-col items-center justify-center min-h-[80vh] w-full max-w-2xl mx-auto space-y-8 animate-in fade-in duration-500">
-            {/* Ambient Audio Player */}
-            <audio ref={audioRef} loop src={ambient ? sounds.find(s => s.id === ambient)?.url : undefined} />
+        <div className="flex flex-col items-center justify-center min-h-[80vh] w-full max-w-2xl mx-auto space-y-8 animate-in fade-in duration-500 px-2">
+            <audio
+                ref={audioRef}
+                loop
+                src={ambient ? SOUNDS.find((s) => s.id === ambient)?.url : undefined}
+            />
 
-            {/* Mode Toggle */}
             <div className="bg-secondary/50 p-1 rounded-full flex relative z-20">
                 <Button
                     variant={timerType === "pomodoro" ? "default" : "ghost"}
                     onClick={() => {
                         setTimerType("pomodoro");
                         setIsActive(false);
-                        setTimeLeft(25 * 60);
                         setMode("focus");
+                        setTimeLeft(getModeDurationSeconds("focus"));
                     }}
                     className="rounded-full px-6"
                 >
-                    🍅 Pomodoro
+                    Pomodoro
                 </Button>
                 <Button
                     variant={timerType === "custom" ? "default" : "ghost"}
                     onClick={() => {
                         setTimerType("custom");
                         setIsActive(false);
-                        setTimeLeft(customMinutes * 60);
+                        setTimeLeft(Math.max(1, customMinutes) * 60);
                     }}
                     className="rounded-full px-6"
                 >
-                    ⏳ Custom
+                    Custom
                 </Button>
             </div>
 
-            {/* Task Binding */}
             <div className="w-full text-center space-y-2 relative z-20">
-                {/* ... (keep task input logic) */}
                 {isEditingTask ? (
                     <Input
+                        aria-label="Focus objective"
                         placeholder="What is your focused goal?"
                         className="text-center text-xl md:text-2xl font-medium border-none bg-transparent placeholder:text-muted-foreground/50 focus-visible:ring-0 focus-visible:ring-offset-0"
                         value={task}
                         onChange={(e) => setTask(e.target.value)}
                         onBlur={() => task.trim() && setIsEditingTask(false)}
                         onKeyDown={(e) => e.key === "Enter" && task.trim() && setIsEditingTask(false)}
-                        autoFocus
+                        maxLength={120}
                     />
                 ) : (
-                    <div
+                    <button
+                        type="button"
                         onClick={() => !isActive && setIsEditingTask(true)}
+                        disabled={isActive}
                         className={cn(
-                            "text-xl md:text-3xl font-bold cursor-pointer hover:opacity-80 transition-all flex items-center justify-center gap-2",
-                            isActive ? "opacity-100" : "opacity-60"
+                            "text-xl md:text-3xl font-bold hover:opacity-80 transition-all inline-flex items-center justify-center gap-2",
+                            isActive ? "opacity-100 cursor-default" : "opacity-75 cursor-pointer"
                         )}
                     >
                         <span>{task}</span>
-                        {!isActive && <span className="text-xs align-top text-muted-foreground">(Click to edit)</span>}
-                    </div>
+                        {!isActive && (
+                            <span className="text-xs font-normal text-muted-foreground">
+                                (Click to edit)
+                            </span>
+                        )}
+                    </button>
                 )}
-                <p className="text-sm text-muted-foreground uppercase tracking-widest">Current Objective</p>
+                <p className="text-sm text-muted-foreground uppercase tracking-widest">
+                    Current Objective
+                </p>
             </div>
 
-            {/* Timer Display */}
             <div className="relative group">
                 <div className="absolute inset-0 bg-primary/20 blur-[100px] rounded-full animate-pulse pointer-events-none" />
-                <div className="relative text-[8rem] md:text-[12rem] font-bold tabular-nums leading-none tracking-tighter drop-shadow-2xl transition-all">
+                <div
+                    role="timer"
+                    aria-live="off"
+                    className="relative text-6xl sm:text-8xl md:text-[10rem] font-bold tabular-nums leading-none tracking-tighter drop-shadow-2xl transition-all"
+                >
                     {formatTime(timeLeft)}
                 </div>
             </div>
 
-            {/* Controls */}
-            <div className="flex flex-col items-center gap-6 relative z-20">
-
-                {/* Main Actions */}
+            <div className="flex flex-col items-center gap-6 relative z-20 w-full">
                 <div className="flex items-center gap-4">
                     <Button
                         size="icon"
                         variant="secondary"
-                        className="w-16 h-16 rounded-full"
+                        className="w-14 h-14 sm:w-16 sm:h-16 rounded-full"
                         onClick={resetTimer}
+                        aria-label="Reset timer"
+                        title="Reset timer"
                     >
-                        <RotateCcw className="w-6 h-6" />
+                        <RotateCcw className="w-6 h-6" aria-hidden="true" />
                     </Button>
 
                     <Button
                         size="icon"
                         className={cn(
-                            "w-24 h-24 rounded-full transition-all duration-300",
-                            isActive ? "bg-rose-500 hover:bg-rose-600" : "bg-emerald-500 hover:bg-emerald-600"
+                            "w-20 h-20 sm:w-24 sm:h-24 rounded-full transition-all duration-300",
+                            isActive
+                                ? "bg-rose-500 hover:bg-rose-600"
+                                : "bg-emerald-500 hover:bg-emerald-600"
                         )}
                         onClick={toggleTimer}
+                        aria-label={isActive ? "Pause timer" : "Start timer"}
+                        title={isActive ? "Pause timer" : "Start timer"}
                     >
-                        {isActive ? <Pause className="w-10 h-10" /> : <Play className="w-10 h-10 ml-1" />}
+                        {isActive ? (
+                            <Pause className="w-9 h-9 sm:w-10 sm:h-10" aria-hidden="true" />
+                        ) : (
+                            <Play className="w-9 h-9 sm:w-10 sm:h-10 ml-1" aria-hidden="true" />
+                        )}
                     </Button>
 
                     <Button
                         size="icon"
                         variant={isStrict ? "destructive" : "secondary"}
-                        className={cn("w-16 h-16 rounded-full", isStrict && "ring-4 ring-rose-500/30")}
-                        onClick={() => {
-                            if (!isActive) {
-                                const newStrict = !isStrict;
-                                setIsStrict(newStrict);
-                                if (newStrict) {
-                                    document.documentElement.requestFullscreen().catch((err) => console.log(err));
-                                } else {
-                                    document.exitFullscreen().catch((err) => console.log(err));
-                                }
-                            }
-                        }}
-                        title="Strict Mode (Fullscreen)"
+                        className={cn(
+                            "w-14 h-14 sm:w-16 sm:h-16 rounded-full",
+                            isStrict && "ring-4 ring-rose-500/30"
+                        )}
+                        onClick={toggleStrictMode}
+                        disabled={isActive}
+                        title="Strict Mode (Fullscreen & tab guard)"
+                        aria-label={isStrict ? "Disable strict mode" : "Enable strict mode"}
+                        aria-pressed={isStrict}
                     >
-                        {isStrict ? <Lock className="w-6 h-6" /> : <Unlock className="w-6 h-6" />}
+                        {isStrict ? (
+                            <Lock className="w-6 h-6" aria-hidden="true" />
+                        ) : (
+                            <Unlock className="w-6 h-6" aria-hidden="true" />
+                        )}
                     </Button>
                 </div>
 
-                {/* Specific Mode Controls */}
                 {timerType === "pomodoro" ? (
-                    <div className="flex items-center p-1 bg-secondary/50 rounded-full">
+                    <div className="flex flex-wrap items-center justify-center p-1 bg-secondary/50 rounded-full gap-1">
                         <Button
                             variant={mode === "focus" ? "default" : "ghost"}
                             onClick={() => changeMode("focus")}
-                            className="rounded-full px-6"
+                            className="rounded-full px-5"
                         >
                             Focus
                         </Button>
                         <Button
                             variant={mode === "shortBreak" ? "default" : "ghost"}
                             onClick={() => changeMode("shortBreak")}
-                            className="rounded-full px-6"
+                            className="rounded-full px-5"
                         >
                             Short Break
                         </Button>
                         <Button
                             variant={mode === "longBreak" ? "default" : "ghost"}
                             onClick={() => changeMode("longBreak")}
-                            className="rounded-full px-6"
+                            className="rounded-full px-5"
                         >
                             Long Break
                         </Button>
                     </div>
                 ) : (
                     <div className="flex items-center gap-4 bg-secondary/30 p-4 rounded-xl">
-                        <span className="text-sm font-medium">Duration (min):</span>
+                        <label htmlFor="custom-minutes-input" className="text-sm font-medium">
+                            Duration (min):
+                        </label>
                         <Input
+                            id="custom-minutes-input"
                             type="number"
-                            min="1"
-                            max="180"
+                            min={1}
+                            max={180}
                             value={customMinutes}
                             onChange={handleCustomTimeChange}
                             disabled={isActive}
@@ -266,11 +358,10 @@ export function FocusTimer() {
                     </div>
                 )}
 
-                {/* Ambient Sounds */}
-                <Card className="glass-card mt-4 border-none bg-white/5">
-                    <CardContent className="p-4 flex items-center gap-4">
-                        <Music className="w-4 h-4 text-muted-foreground" />
-                        <div className="flex bg-background/50 rounded-lg p-1">
+                <Card className="glass-card mt-2 border-none bg-white/5 w-full sm:w-auto">
+                    <CardContent className="p-4 flex flex-wrap items-center justify-center gap-4">
+                        <Music className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
+                        <div className="flex flex-wrap bg-background/50 rounded-lg p-1 gap-1">
                             <Button
                                 size="sm"
                                 variant={ambient === null ? "secondary" : "ghost"}
@@ -279,7 +370,7 @@ export function FocusTimer() {
                             >
                                 Off
                             </Button>
-                            {sounds.map(s => (
+                            {SOUNDS.map((s) => (
                                 <Button
                                     key={s.id}
                                     size="sm"
@@ -291,10 +382,14 @@ export function FocusTimer() {
                                 </Button>
                             ))}
                         </div>
-                        <div className="flex items-center gap-2 w-24">
-                            <Volume2 className="w-4 h-4 text-muted-foreground" />
+                        <div className="flex items-center gap-2 w-28">
+                            <Volume2
+                                className="w-4 h-4 text-muted-foreground shrink-0"
+                                aria-hidden="true"
+                            />
                             <input
                                 type="range"
+                                aria-label="Ambient sound volume"
                                 min="0"
                                 max="1"
                                 step="0.1"
@@ -307,9 +402,9 @@ export function FocusTimer() {
                 </Card>
 
                 {isStrict && (
-                    <div className="flex items-center gap-2 text-rose-400 text-sm animate-pulse">
-                        <AlertCircle className="w-4 h-4" />
-                        <span>Strict Mode Active: Tab switching will pause timer!</span>
+                    <div className="flex items-center gap-2 text-rose-400 text-sm animate-pulse text-center">
+                        <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        <span>Strict Mode Active: Tab switching pauses the timer</span>
                     </div>
                 )}
             </div>
