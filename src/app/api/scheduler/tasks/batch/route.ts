@@ -1,40 +1,47 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { handlePrismaError, jsonError, parseJsonBody, requireAuth } from "@/lib/api/response";
+import { batchUpdateTasksSchema } from "@/lib/validation";
 
-// PUT: Batch update tasks (for schedule generation)
 export async function PUT(req: Request) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
+
+        const parsed = await parseJsonBody(req, batchUpdateTasksSchema);
+        if (parsed.error) return parsed.error;
+
+        const userId = auth.ctx.user.id;
+        const { updates } = parsed.data;
+        const uniqueIds = Array.from(new Set(updates.map((u) => u.id)));
+
+        const ownedCount = await prisma.task.count({
+            where: {
+                id: { in: uniqueIds },
+                userId,
+            },
+        });
+
+        if (ownedCount !== uniqueIds.length) {
+            return jsonError("One or more tasks were not found or do not belong to you.", 404);
         }
 
-        const { updates } = await req.json(); // Array of { id, assignedSlot: { day, startTime } }
-
-        if (!Array.isArray(updates)) {
-            return NextResponse.json({ error: "Invalid format" }, { status: 400 });
-        }
-
-        // Perform updates in transaction or parallel
-        // Prisma transaction is safer
         await prisma.$transaction(
-            updates.map((u: { id: string; assignedSlot?: { day: string; startTime: string } }) =>
+            updates.map((u) =>
                 prisma.task.update({
-                    where: { id: u.id, userId: session.user.id },
+                    where: { id: u.id },
                     data: {
-                        scheduledDay: u.assignedSlot?.day || null,
-                        scheduledStartTime: u.assignedSlot?.startTime || null
-                    }
+                        scheduledDay: u.assignedSlot?.day ?? null,
+                        scheduledStartTime: u.assignedSlot?.startTime ?? null,
+                    },
                 })
             )
         );
 
         return NextResponse.json({ success: true });
     } catch (error) {
-        console.error("Batch update error", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "scheduler/tasks/batch PUT");
     }
 }
