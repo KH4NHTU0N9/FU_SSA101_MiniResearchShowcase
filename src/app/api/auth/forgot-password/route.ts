@@ -1,53 +1,64 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendPasswordResetEmail } from "@/lib/email";
+import {
+    guardOrigin,
+    guardRateLimit,
+    handlePrismaError,
+    parseJsonBody,
+} from "@/lib/api/response";
+import { generateNumericOtp, hashOtp } from "@/lib/security";
+import { forgotPasswordSchema } from "@/lib/validation";
+
+const RESET_TTL_MS = 15 * 60 * 1000;
+const UNIFORM_RESPONSE = {
+    message: "If your email is in our system, you will receive a reset code.",
+};
 
 export async function POST(req: Request) {
     try {
-        const { email } = await req.json();
+        const originError = guardOrigin(req);
+        if (originError) return originError;
 
-        if (!email) {
-            return NextResponse.json({ error: "Email is required." }, { status: 400 });
-        }
+        const rateError = guardRateLimit(req, "auth:forgot-password", {
+            windowMs: 15 * 60 * 1000,
+            maxRequests: 5,
+        });
+        if (rateError) return rateError;
 
-        // 1. Check if user exists
+        const parsed = await parseJsonBody(req, forgotPasswordSchema);
+        if (parsed.error) return parsed.error;
+
+        const { email } = parsed.data;
+        const code = generateNumericOtp();
+        const codeHash = hashOtp(email, code);
+        const expires = new Date(Date.now() + RESET_TTL_MS);
+
         const user = await prisma.user.findUnique({
             where: { email },
+            select: { id: true, email: true },
         });
 
-        if (!user) {
-            // Security best practice: Do not reveal if email exists or not, just return success
-            return NextResponse.json(
-                { message: "If your email is in our system, you will receive a reset code." },
-                { status: 200 }
-            );
+        if (user) {
+            await prisma.user.update({
+                where: { id: user.id },
+                data: {
+                    resetCode: codeHash,
+                    resetAttempts: 0,
+                    resetCodeExpires: expires,
+                },
+            });
+
+            const sent = await sendPasswordResetEmail(user.email, code);
+            if (!sent) {
+                console.error("[auth/forgot-password] SMTP delivery failed for password reset request");
+            }
         }
 
-        // 2. Generate 6 digit code
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        const expires = new Date(Date.now() + 15 * 60 * 1000); // 15 mins from now
-
-        // 3. Save code to User model
-        await prisma.user.update({
-            where: { id: user.id },
-            data: {
-                resetCode: code,
-                resetCodeExpires: expires,
-            },
-        });
-
-        // 4. Send Email
-        const emailSent = await sendPasswordResetEmail(user.email, code);
-
-        // Security best practice: Always return same message
-        return NextResponse.json(
-            { message: "If your email is in our system, you will receive a reset code." },
-            { status: 200 }
-        );
-
+        return NextResponse.json(UNIFORM_RESPONSE, { status: 200 });
     } catch (error) {
-        console.error("Forgot password error:", error);
-        return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
+        return handlePrismaError(error, "auth/forgot-password POST");
     }
 }
