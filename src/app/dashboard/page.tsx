@@ -2,75 +2,90 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import DashboardClient from "./dashboard-client";
+import type { AssessmentResultDTO, MoodHistoryEntry } from "@/types";
 
-// Force dynamic since we use cookies/session
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-    // 1. Server-side Auth Check
     const session = await getSession();
-    if (!session || !session.user) {
+    if (!session?.user?.id) {
         redirect("/login");
     }
 
-    let assessmentData = null;
-    let history: { mood: number; focus: number; energy: number; emotion: string; date: string; createdAt?: string }[] = [];
+    const dbUser = await prisma.user
+        .findUnique({
+            where: { id: session.user.id },
+            select: { id: true, name: true, email: true, tokenVersion: true },
+        })
+        .catch(() => null);
+
+    if (!dbUser || dbUser.tokenVersion !== session.user.tokenVersion) {
+        redirect("/login");
+    }
+
+    let assessmentData: AssessmentResultDTO | null = null;
+    let history: MoodHistoryEntry[] = [];
 
     try {
-        // 2. Parallel Data Fetching
         const [assessment, moodLogs] = await Promise.all([
             prisma.assessment.findFirst({
-                where: { userId: session.user.id },
-                orderBy: { createdAt: 'desc' },
-                select: { depressionScore: true, anxietyScore: true, stressScore: true }
+                where: { userId: dbUser.id },
+                orderBy: { createdAt: "desc" },
+                select: {
+                    id: true,
+                    depressionScore: true,
+                    anxietyScore: true,
+                    stressScore: true,
+                    createdAt: true,
+                },
             }),
             prisma.moodLog.findMany({
-                where: { userId: session.user.id },
-                orderBy: { createdAt: 'desc' },
+                where: { userId: dbUser.id },
+                orderBy: { createdAt: "desc" },
                 take: 14,
                 select: {
+                    id: true,
                     mood: true,
                     focus: true,
                     createdAt: true,
                     emotion: true,
-                    energy: true
-                }
-            })
+                    energy: true,
+                },
+            }),
         ]);
 
-        // 3. Process Data for Client
         if (assessment) {
             assessmentData = {
+                id: assessment.id,
+                createdAt: assessment.createdAt.toISOString(),
                 scores: {
                     Depression: assessment.depressionScore,
                     Anxiety: assessment.anxietyScore,
-                    Stress: assessment.stressScore
-                }
+                    Stress: assessment.stressScore,
+                },
             };
         }
 
-        // Mood History (Reverse: Oldest -> Newest for Chart)
-        history = moodLogs.reverse().map((log) => ({
-            ...log,
+        history = [...moodLogs].reverse().map((log) => ({
+            id: log.id,
             mood: Number(log.mood),
             focus: Number(log.focus),
+            energy: Number(log.energy),
+            emotion: log.emotion,
             createdAt: log.createdAt.toISOString(),
-            date: log.createdAt.toLocaleDateString('en-US', { weekday: 'short' }),
+            date: log.createdAt.toLocaleDateString("en-US", { weekday: "short" }),
         }));
-
-        // Pad with empty if single entry (UI consistency)
-        if (history.length === 1) {
-            history.push({ ...history[0], date: "" });
-        }
     } catch (error) {
         console.error("[Dashboard SSR Error]", error);
-        // Fall back gracefully - show empty dashboard instead of crashing
     }
 
-    // 4. Render Client Component
     return (
         <DashboardClient
-            user={session.user}
+            user={{
+                id: dbUser.id,
+                name: dbUser.name,
+                email: dbUser.email,
+            }}
             initialHistory={history}
             assessmentData={assessmentData}
         />
