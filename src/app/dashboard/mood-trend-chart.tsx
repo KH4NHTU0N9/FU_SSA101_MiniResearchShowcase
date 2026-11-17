@@ -1,13 +1,21 @@
 "use client";
 
 import {
-    LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area
+    Area,
+    CartesianGrid,
+    ComposedChart,
+    Line,
+    ResponsiveContainer,
+    Tooltip,
+    XAxis,
+    YAxis,
 } from "recharts";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
+import type { MoodHistoryEntry } from "@/types";
 
 interface MoodTrendChartProps {
-    history: { mood: number; focus: number; energy: number; emotion: string; date: string }[];
+    history: MoodHistoryEntry[];
     onAddCheckIn: () => void;
 }
 
@@ -16,16 +24,18 @@ export default function MoodTrendChart({ history, onAddCheckIn }: MoodTrendChart
         return (
             <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-2">
                 <p>No daily data yet.</p>
-                <Button variant="outline" size="sm" onClick={onAddCheckIn}>
+                <Button type="button" variant="outline" size="sm" onClick={onAddCheckIn}>
                     <Plus className="w-4 h-4 mr-2" /> Add First Check-in
                 </Button>
             </div>
         );
     }
 
+    const showDots = history.length <= 1;
+
     return (
         <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={history}>
+            <ComposedChart data={history}>
                 <defs>
                     <linearGradient id="colorMood" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3} />
@@ -35,8 +45,13 @@ export default function MoodTrendChart({ history, onAddCheckIn }: MoodTrendChart
                 <XAxis dataKey="date" stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
                 <YAxis domain={[0, 6]} hide />
                 <Tooltip
-                    contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                    itemStyle={{ color: 'hsl(var(--foreground))' }}
+                    contentStyle={{
+                        backgroundColor: "hsl(var(--card))",
+                        borderRadius: "8px",
+                        border: "none",
+                        boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+                    }}
+                    itemStyle={{ color: "hsl(var(--foreground))" }}
                 />
                 <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.1} />
                 <Area
@@ -46,6 +61,7 @@ export default function MoodTrendChart({ history, onAddCheckIn }: MoodTrendChart
                     fillOpacity={1}
                     fill="url(#colorMood)"
                     strokeWidth={3}
+                    dot={showDots}
                     name="Mood Score"
                 />
                 <Line
@@ -54,10 +70,10 @@ export default function MoodTrendChart({ history, onAddCheckIn }: MoodTrendChart
                     stroke="#0d9488"
                     strokeWidth={2}
                     strokeDasharray="5 5"
-                    dot={false}
+                    dot={showDots ? { r: 4 } : false}
                     name="Focus Level"
                 />
-            </AreaChart>
+            </ComposedChart>
         </ResponsiveContainer>
     );
 }
