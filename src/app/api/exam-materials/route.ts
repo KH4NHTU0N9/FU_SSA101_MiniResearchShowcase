@@ -1,31 +1,61 @@
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+import { put } from "@vercel/blob";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { put } from '@vercel/blob';
+import {
+    guardRateLimit,
+    handlePrismaError,
+    jsonError,
+    requireAuth,
+} from "@/lib/api/response";
+import { sanitizeFilename } from "@/lib/security";
+import {
+    createMaterialMetaSchema,
+    hasAllowedMaterialExtension,
+    MAX_DIRECT_SERVER_FILE_BYTES,
+    parsePaginationParams,
+    uploadedFilesArraySchema,
+} from "@/lib/validation";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+const MIME_MAP: Record<string, string> = {
+    pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    doc: "application/msword",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ppt: "application/vnd.ms-powerpoint",
+    zip: "application/zip",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+};
 
-// GET: Fetch materials with optional filters
 export async function GET(req: Request) {
     try {
-        const { searchParams } = new URL(req.url);
-        const semesterId = searchParams.get('semesterId');
-        const subjectId = searchParams.get('subjectId');
-        const search = searchParams.get('search') || '';
-        const page = parseInt(searchParams.get('page') || '1');
-        const limit = 20;
-        const skip = (page - 1) * limit;
+        const auth = await requireAuth();
+        if (auth.error) return auth.error;
 
-        const where: Record<string, unknown> = { status: 'APPROVED' };
+        const { searchParams } = new URL(req.url);
+        const semesterId = searchParams.get("semesterId")?.trim() || undefined;
+        const subjectId = searchParams.get("subjectId")?.trim() || undefined;
+        const search = searchParams.get("search")?.trim().slice(0, 120) || "";
+        const { page, limit, skip } = parsePaginationParams(
+            searchParams.get("page"),
+            searchParams.get("limit"),
+            20,
+            50
+        );
+
+        const where: Record<string, unknown> = { status: "APPROVED" };
         if (semesterId) where.semesterId = semesterId;
         if (subjectId) where.subjectId = subjectId;
         if (search) {
             where.OR = [
-                { title: { contains: search, mode: 'insensitive' } },
-                { description: { contains: search, mode: 'insensitive' } },
-                { subject: { code: { contains: search, mode: 'insensitive' } } },
-                { semester: { name: { contains: search, mode: 'insensitive' } } },
+                { title: { contains: search, mode: "insensitive" } },
+                { description: { contains: search, mode: "insensitive" } },
+                { subject: { code: { contains: search, mode: "insensitive" } } },
+                { semester: { name: { contains: search, mode: "insensitive" } } },
             ];
         }
 
@@ -34,153 +64,187 @@ export async function GET(req: Request) {
                 where,
                 skip,
                 take: limit,
-                orderBy: { createdAt: 'desc' },
+                orderBy: { createdAt: "desc" },
                 select: {
-                    id: true, title: true, description: true, fileUrl: true,
-                    size: true, type: true, totalDownloads: true, createdAt: true,
+                    id: true,
+                    title: true,
+                    description: true,
+                    fileUrl: true,
+                    size: true,
+                    type: true,
+                    totalDownloads: true,
+                    createdAt: true,
                     semester: { select: { id: true, name: true } },
                     subject: { select: { id: true, code: true } },
                     uploadedBy: { select: { id: true, name: true } },
-                    files: { select: { id: true, name: true, type: true, fileUrl: true } },
-                }
+                    files: {
+                        select: { id: true, name: true, type: true, fileUrl: true, size: true },
+                    },
+                },
             }),
-            prisma.material.count({ where })
+            prisma.material.count({ where }),
         ]);
 
         return NextResponse.json({ materials, total, page, limit });
     } catch (error) {
-        console.error('[exam-materials GET ERROR]', error instanceof Error ? error.stack : error, JSON.stringify(error));
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "exam-materials GET");
     }
 }
 
-// POST: Upload a new material (auth required) - stores files in Vercel Blob
 export async function POST(req: Request) {
     try {
-        const session = await getSession();
-        if (!session?.user?.id) {
-            return NextResponse.json({ error: "Unauthorized - please login first" }, { status: 401 });
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
+
+        const rateError = guardRateLimit(
+            req,
+            "exam-materials:post",
+            { windowMs: 15 * 60 * 1000, maxRequests: 20 },
+            auth.ctx.user.id
+        );
+        if (rateError) return rateError;
+
+        let formData: FormData;
+        try {
+            formData = await req.formData();
+        } catch {
+            return jsonError("Expected multipart form data", 400);
         }
 
-        const formData = await req.formData();
-        const title = formData.get('title') as string;
-        const description = formData.get('description') as string;
-        const semesterId = formData.get('semesterId') as string;
-        const subjectId = formData.get('subjectId') as string;
-        
-        // Handle both direct file upload (old) and client-side upload metadata (new)
-        const files = formData.getAll('files') as File[];
-        const uploadedFilesJson = formData.get('uploadedFiles') as string;
-        
-        if (!title || !semesterId || !subjectId) {
-            return NextResponse.json({ error: "Missing required fields (title, semester, subject)" }, { status: 400 });
+        const metaParsed = createMaterialMetaSchema.safeParse({
+            title: String(formData.get("title") ?? ""),
+            description: formData.get("description") ? String(formData.get("description")) : null,
+            semesterId: String(formData.get("semesterId") ?? ""),
+            subjectId: String(formData.get("subjectId") ?? ""),
+        });
+
+        if (!metaParsed.success) {
+            return jsonError(metaParsed.error.issues[0]?.message || "Invalid material metadata", 400);
         }
+
+        const { title, description, semesterId, subjectId } = metaParsed.data;
+
+        const subject = await prisma.subject.findFirst({
+            where: { id: subjectId, semesterId },
+            select: { id: true },
+        });
+        if (!subject) {
+            return jsonError("Selected semester and subject do not exist or do not match.", 400);
+        }
+
+        const uploadedFilesRaw = formData.get("uploadedFiles");
+        const directFiles = formData
+            .getAll("files")
+            .filter((entry): entry is File => entry instanceof File);
 
         let materialFiles: { url: string; name: string; size: number }[] = [];
 
-        if (uploadedFilesJson) {
-            // New way: Client uploaded directly to Blob and sent us URLs
+        if (typeof uploadedFilesRaw === "string" && uploadedFilesRaw.trim().length > 0) {
+            let parsedJson: unknown;
             try {
-                materialFiles = JSON.parse(uploadedFilesJson);
-            } catch (e) {
-                return NextResponse.json({ error: "Invalid uploadedFiles data" }, { status: 400 });
-            }
-        } else if (files && files.length > 0) {
-            // Old way: Files sent to our server (limited to 4.5MB by Vercel)
-            const blockedExtensions = ['.exe', '.sh', '.bat', '.cmd', '.ps1', '.vbs', '.msi', '.dll'];
-            const allowedExtensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.zip', '.png', '.jpg', '.jpeg'];
-            const MAX_SIZE = 4.5 * 1024 * 1024; // Lowered to 4.5MB to match Vercel hobby limit for server-side
-
-            const mimeMap: Record<string, string> = {
-                pdf: 'application/pdf',
-                docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                doc: 'application/msword',
-                pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-                ppt: 'application/vnd.ms-powerpoint',
-                zip: 'application/zip',
-                png: 'image/png',
-                jpg: 'image/jpeg',
-                jpeg: 'image/jpeg',
-            };
-
-            for (const file of files) {
-                const fileName = file.name.toLowerCase();
-                if (blockedExtensions.some(ext => fileName.endsWith(ext))) {
-                    return NextResponse.json({ error: `File type not allowed: ${fileName}` }, { status: 400 });
-                }
-                if (!allowedExtensions.some(ext => fileName.endsWith(ext))) {
-                    return NextResponse.json({ error: `Only PDF, DOCX, PPTX, ZIP, PNG, JPG files are allowed: ${fileName}` }, { status: 400 });
-                }
-                if (file.size > MAX_SIZE) {
-                    return NextResponse.json({ error: `File too large for direct upload (${(file.size / 1024 / 1024).toFixed(1)}MB). Vercel limits direct uploads to 4.5MB. Please try again with client-side upload.` }, { status: 400 });
-                }
+                parsedJson = JSON.parse(uploadedFilesRaw);
+            } catch {
+                return jsonError("Invalid uploadedFiles JSON payload", 400);
             }
 
-            // Upload files to Blob if they came to the server
-            const uploadResults = await Promise.all(files.map(async (file) => {
-                const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
-                const contentType = mimeMap[ext] || 'application/octet-stream';
+            const filesValidated = uploadedFilesArraySchema.safeParse(parsedJson);
+            if (!filesValidated.success) {
+                return jsonError(
+                    filesValidated.error.issues[0]?.message || "Invalid uploadedFiles metadata",
+                    400
+                );
+            }
 
-                if (!process.env.BLOB_READ_WRITE_TOKEN) {
-                    console.error('[exam-materials POST] BLOB_READ_WRITE_TOKEN is missing');
-                    throw new Error("Storage configuration error (BLOB TOKEN MISSING)");
-                }
-
-                const blob = await put(`exam-materials/temp/${Date.now()}-${file.name}`, file, {
-                    access: 'public',
-                    contentType,
-                });
-                
-                return { url: blob.url, name: file.name, size: file.size };
+            materialFiles = filesValidated.data.map((f) => ({
+                url: f.url,
+                name: sanitizeFilename(f.name, "material"),
+                size: f.size,
             }));
-            materialFiles = uploadResults;
+        } else if (directFiles.length > 0) {
+            if (!process.env.BLOB_READ_WRITE_TOKEN) {
+                return jsonError("File storage is not configured on the server.", 503);
+            }
+
+            for (const file of directFiles) {
+                const safeName = sanitizeFilename(file.name, "file");
+                if (!hasAllowedMaterialExtension(safeName)) {
+                    return jsonError(`File type not allowed: ${safeName}`, 400);
+                }
+                if (file.size <= 0 || file.size > MAX_DIRECT_SERVER_FILE_BYTES) {
+                    return jsonError(
+                        `File size invalid for direct upload (${safeName}). Max 4.5MB.`,
+                        400
+                    );
+                }
+            }
+
+            materialFiles = await Promise.all(
+                directFiles.map(async (file) => {
+                    const safeName = sanitizeFilename(file.name, "file");
+                    const ext = safeName.split(".").pop()?.toLowerCase() || "bin";
+                    const contentType = MIME_MAP[ext] || "application/octet-stream";
+
+                    const blob = await put(
+                        `exam-materials/${Date.now()}-${safeName}`,
+                        file,
+                        {
+                            access: "public",
+                            contentType,
+                            addRandomSuffix: true,
+                        }
+                    );
+
+                    return { url: blob.url, name: safeName, size: file.size };
+                })
+            );
         }
 
         if (materialFiles.length === 0) {
-            return NextResponse.json({ error: "No files provided" }, { status: 400 });
+            return jsonError("No files provided", 400);
         }
 
         const totalSize = materialFiles.reduce((acc, f) => acc + f.size, 0);
-        const primaryExt = materialFiles[0].name.split('.').pop()?.toUpperCase() || 'UNKNOWN';
+        const primaryExt = materialFiles[0].name.split(".").pop()?.toUpperCase() || "UNKNOWN";
 
-        // Create the Material record
-        const material = await prisma.material.create({
-            data: {
-                title,
-                description: description || null,
-                fileUrl: materialFiles[0].url,
-                size: totalSize,
-                type: materialFiles.length > 1 ? 'MULTIPLE' : primaryExt,
-                semesterId,
-                subjectId,
-                uploadedById: session.user.id,
-                status: 'APPROVED',
-            }
-        });
-
-        // Create MaterialFile records
-        await Promise.all(materialFiles.map((file) => 
-            prisma.materialFile.create({
+        const material = await prisma.$transaction(async (tx) => {
+            const created = await tx.material.create({
                 data: {
-                    materialId: material.id,
+                    title,
+                    description: description || null,
+                    fileUrl: materialFiles[0].url,
+                    size: totalSize,
+                    type: materialFiles.length > 1 ? "MULTIPLE" : primaryExt,
+                    semesterId,
+                    subjectId,
+                    uploadedById: auth.ctx.user.id,
+                    status: "APPROVED",
+                },
+            });
+
+            await tx.materialFile.createMany({
+                data: materialFiles.map((file) => ({
+                    materialId: created.id,
                     name: file.name,
                     fileUrl: file.url,
-                    type: file.name.split('.').pop()?.toUpperCase() || 'BIN',
+                    type: file.name.split(".").pop()?.toUpperCase() || "BIN",
                     size: file.size,
-                }
-            })
-        ));
+                })),
+            });
 
-        return NextResponse.json({
-            id: material.id,
-            title: material.title,
-            type: material.type,
-            size: material.size,
-            createdAt: material.createdAt
+            return created;
         });
+
+        return NextResponse.json(
+            {
+                id: material.id,
+                title: material.title,
+                type: material.type,
+                size: material.size,
+                createdAt: material.createdAt,
+            },
+            { status: 201 }
+        );
     } catch (error) {
-        console.error('[exam-materials POST]', error);
-        const message = error instanceof Error ? error.message : "Internal Server Error";
-        return NextResponse.json({ error: message }, { status: 500 });
+        return handlePrismaError(error, "exam-materials POST");
     }
 }
