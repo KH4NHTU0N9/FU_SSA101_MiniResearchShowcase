@@ -11,26 +11,56 @@ model User {
   id       String  @id @default(cuid())
   name     String?
   email    String  @unique
-  phone    String?
+  phone    String? @unique
   password String // Hashed
 
+  tokenVersion     Int       @default(0)
   resetCode        String?
+  resetAttempts    Int       @default(0)
   resetCodeExpires DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  assessments    Assessment[]
-  moodLogs       MoodLog[]
-  chats          Chat[]
-  flashcardDecks FlashcardDeck[]
-  fixedEvents    FixedEvent[]
-  tasks          Task[]
-  posts          Post[]
-  comments       Comment[]
-  postLikes      PostLike[]
+  assessments        Assessment[]
+  moodLogs           MoodLog[]
+  chats              Chat[]
+  flashcardDecks     FlashcardDeck[]
+  fixedEvents        FixedEvent[]
+  tasks              Task[]
+  posts              Post[]
+  comments           Comment[]
+  postLikes          PostLike[]
+  uploadedMaterials  Material[]
+  pendingEmailChange PendingEmailChange?
+}
 
-  uploadedMaterials Material[]
+model PendingRegistration {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  phone        String?
+  passwordHash String
+  otpHash      String
+  attempts     Int      @default(0)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+model PendingEmailChange {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  newEmail  String
+  otpHash   String
+  attempts  Int      @default(0)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
 }
 
 model Assessment {
@@ -123,6 +153,7 @@ model FixedEvent {
   createdAt DateTime @default(now())
 
   @@index([userId])
+  @@index([userId, day])
 }
 
 model Task {
@@ -141,6 +172,7 @@ model Task {
 
   @@index([userId])
   @@index([groupId])
+  @@index([userId, groupId])
 }
 
 // --- Community System ---
@@ -165,7 +197,7 @@ model Post {
   @@index([createdAt])
   @@index([authorId])
   @@index([category])
-  @@index([category, createdAt]) // Optimized for filtering by category + sorting
+  @@index([category, createdAt])
 }
 
 model Comment {
@@ -178,6 +210,8 @@ model Comment {
   createdAt DateTime @default(now())
 
   @@index([postId])
+  @@index([postId, createdAt])
+  @@index([authorId])
 }
 
 model PostLike {
@@ -243,6 +277,7 @@ model Material {
   @@index([semesterId])
   @@index([subjectId])
   @@index([uploadedById])
+  @@index([status, createdAt])
 }
 
 model MaterialReport {
