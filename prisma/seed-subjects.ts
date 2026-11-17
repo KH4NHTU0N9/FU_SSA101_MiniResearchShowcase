@@ -1,8 +1,11 @@
-import { PrismaClient } from '@prisma/client';
+import { config } from "dotenv";
+import { PrismaClient } from "@prisma/client";
 
-const prisma = new PrismaClient();
+config({ path: ".env.local" });
+config();
 
-const data = {
+export const SUBJECT_SEED_DATA: Record<string, string[]> = {
+    "Chưa rõ kỳ": ["Quy Định", "Hướng Dẫn Đăng Tài Liệu", "BDI301c", "DRS301", "DWB301", "ENM402", "ENW493c", "EPE301", "EPT24", "FRS401", "IAR401", "ITB302c", "PLT", "PRE301", "PRN222", "PRX301", "SDN302"],
     "Kỳ 0": ["COV111", "COV121", "COV131", "ENT103", "ENT104", "ENT203", "ENT303", "ENT304", "ENT403", "ENT404", "ENT503", "EPT202", "TRANS 4", "TRANS 5", "TRANS 6"],
     "Kỳ 1": ["ASI101", "CEA201", "CSI104", "CSI105", "CSI106", "DRS102", "DTG111", "EAW211", "ECN101", "ECO102", "ECO111", "ECR201", "ECR202", "ENG302c", "ENH301", "ENM112c", "ENM301", "ENM302", "ENP102", "FMM101", "HMO102", "JPD116", "JPD126", "KRL112", "LAE101", "MAC102", "MAE101", "MED201", "MGT103", "MKT101", "PFP191", "PRF192", "SDI101m", "SSC102", "SSL101c"],
     "Kỳ 2": ["ACC101", "AET101", "AET102", "AIG201c", "AIG202c", "CMC201", "CPP201b", "CSD203", "DRP101", "DTG201", "EAL201", "EAW221", "ECB101", "ECN211", "ECO121", "ELC201", "ENH401", "ENM211c", "ENM401", "EVN202", "FOM200", "HOM202", "HOM301c", "IAO201c", "IAO202", "JPD216", "JPD226", "KRL122", "LAB221c", "LTG202", "MAD101", "MMK101", "MMP201", "NWC203c", "NWC204", "OBE102c", "OSG202", "PRN212", "PRO191", "PRO192", "PRO201", "SCC201", "SSC101", "SSG104", "TAB201"],
@@ -12,50 +15,43 @@ const data = {
     "Kỳ 6": ["ENW492c", "NLP301c", "OJT202"],
     "Kỳ 7": ["ADS301m", "AIL302m", "AIT301", "BDI302c", "BRA301", "CHN132", "DAT301m", "ELT401", "EVN201", "EXE_101", "HOD401", "IAP301", "IAW301", "IIV301", "IMP301", "ISC301", "ISC302", "ITB301c", "JPD316", "JTE301", "KMS301", "KOR321", "LAW102", "LAW201", "LOG311", "MKT209m", "MKT309m", "PRM392", "PRN221", "PRU211m", "PRU212", "RMC301", "RMC301m", "SAP311", "SAP331", "SDN301m", "SSN301", "SWC201", "SWD391", "SWD392", "SYB302c", "WBS220", "WDU202c"],
     "Kỳ 8": ["AID301c", "BKG302", "BPS301", "CPV301", "DBM301", "DBW301", "DSS301", "EXE201", "IFT201c", "JIS401", "JIT301", "JIT401", "JIT491", "KOR411", "LOG321", "MKT301", "MLN101", "MLN111", "MLN122", "MMA301", "PMG201c", "PMG202c", "PRN231", "PRU221", "PRU221m", "REL301m", "RMB301", "SAP321", "SPM401", "WDP301", "WDU203c"],
-    "Kỳ 9": ["HCM201", "HCM202", "ISP490", "MLN131", "SEO102c", "SEO201c", "SEP490", "VNR201", "VNR202"]
+    "Kỳ 9": ["HCM201", "HCM202", "ISP490", "MLN131", "SEO102c", "SEO201c", "SEP490", "VNR201", "VNR202"],
 };
 
-async function main() {
-    console.log("Seeding Semesters and Subjects...");
-
-    for (const [semesterName, subjects] of Object.entries(data)) {
-        // 1. Upsert Semester
-        const semester = await prisma.semester.upsert({
+/**
+ * Idempotently seeds all FPTU semesters and unique subject codes without N+1 race/unique failures.
+ */
+export async function seedSubjects(client: PrismaClient) {
+    for (const [semesterName, subjects] of Object.entries(SUBJECT_SEED_DATA)) {
+        const semester = await client.semester.upsert({
             where: { name: semesterName },
             update: {},
-            create: { name: semesterName }
+            create: { name: semesterName },
         });
 
-        console.log(`✅ Created/Found Semester: ${semester.name}`);
-
-        // 2. Insert Subjects for this Semester
-        let addedCount = 0;
-        for (const subjectCode of subjects) {
-            const existing = await prisma.subject.findFirst({
-                where: { code: subjectCode, semesterId: semester.id }
-            });
-
-            if (!existing) {
-                await prisma.subject.create({
-                    data: {
-                        code: subjectCode,
-                        semesterId: semester.id
-                    }
-                });
-                addedCount++;
-            }
-        }
-        console.log(`   -> Added ${addedCount} new subjects.`);
+        const normalizedCodes = Array.from(new Set(subjects.map((s) => s.trim()).filter(Boolean)));
+        await client.subject.createMany({
+            data: normalizedCodes.map((code) => ({
+                code,
+                semesterId: semester.id,
+            })),
+            skipDuplicates: true,
+        });
     }
-
-    console.log("🎉 Seeding completed successfully!");
 }
 
-main()
-    .catch((e) => {
-        console.error(e);
-        process.exit(1);
-    })
-    .finally(async () => {
+async function main() {
+    const prisma = new PrismaClient();
+    try {
+        await seedSubjects(prisma);
+    } finally {
         await prisma.$disconnect();
+    }
+}
+
+if (require.main === module) {
+    main().catch((error) => {
+        console.error("Failed to seed semesters and subjects:", error);
+        process.exit(1);
     });
+}
