@@ -1,36 +1,57 @@
-export const dynamic = 'force-dynamic';
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
-import { prisma } from "@/lib/prisma";
+export const dynamic = "force-dynamic";
 
-export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+import { del } from "@vercel/blob";
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { handlePrismaError, jsonError, requireAuth } from "@/lib/api/response";
+import { isAllowedBlobUrl } from "@/lib/security";
+
+export async function DELETE(
+    req: Request,
+    { params }: { params: Promise<{ id: string }> }
+) {
     try {
-        const session = await getSession();
-        if (!session?.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
         const { id } = await params;
 
         const material = await prisma.material.findUnique({
             where: { id },
-            select: { uploadedById: true }
+            select: {
+                uploadedById: true,
+                fileUrl: true,
+                files: { select: { fileUrl: true } },
+            },
         });
 
         if (!material) {
-            return NextResponse.json({ error: "Material not found" }, { status: 404 });
+            return jsonError("Material not found", 404);
         }
 
-        // Only the uploader can delete
-        if (material.uploadedById !== session.user.id) {
-            return NextResponse.json({ error: "Forbidden – you can only delete your own materials" }, { status: 403 });
+        if (material.uploadedById !== auth.ctx.user.id) {
+            return jsonError("Forbidden – you can only delete your own materials", 403);
         }
 
         await prisma.material.delete({ where: { id } });
 
+        if (process.env.BLOB_READ_WRITE_TOKEN) {
+            const blobUrls = Array.from(
+                new Set(
+                    [material.fileUrl, ...material.files.map((f) => f.fileUrl)].filter(
+                        (url): url is string => typeof url === "string" && isAllowedBlobUrl(url)
+                    )
+                )
+            );
+            if (blobUrls.length > 0) {
+                await del(blobUrls).catch((blobErr) => {
+                    console.error("[material DELETE blob cleanup]", blobErr);
+                });
+            }
+        }
+
         return NextResponse.json({ success: true });
     } catch (error) {
-        console.error('[material DELETE]', error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "exam-materials DELETE");
     }
 }
