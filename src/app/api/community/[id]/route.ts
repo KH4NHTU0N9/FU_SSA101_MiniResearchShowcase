@@ -1,37 +1,38 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { handlePrismaError, jsonError, requireAuth } from "@/lib/api/response";
+import { invalidateCommunityCache } from "@/lib/community/queries";
 
-export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(
+    req: Request,
+    { params }: { params: Promise<{ id: string }> }
+) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
         const { id } = await params;
 
-        // Check if post exists and belongs to user
         const post = await prisma.post.findUnique({
-            where: { id }
+            where: { id },
+            select: { id: true, authorId: true },
         });
 
         if (!post) {
-            return NextResponse.json({ error: "Post not found" }, { status: 404 });
+            return jsonError("Post not found", 404);
         }
 
-        if (post.authorId !== session.user.id) {
-            return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        if (post.authorId !== auth.ctx.user.id) {
+            return jsonError("Forbidden", 403);
         }
 
-        await prisma.post.delete({
-            where: { id }
-        });
+        await prisma.post.delete({ where: { id } });
+        invalidateCommunityCache();
 
         return NextResponse.json({ success: true });
-    } catch {
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (error) {
+        return handlePrismaError(error, "community DELETE");
     }
 }
