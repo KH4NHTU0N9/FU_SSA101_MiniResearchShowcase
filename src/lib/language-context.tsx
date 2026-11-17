@@ -1,7 +1,10 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
-import { translations, Language, TranslationKey } from "./translations";
+import React, { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from "react";
+import { translations, type Language, type TranslationKey } from "./translations";
+
+const STORAGE_KEY = "app_language";
+const LANGUAGE_EVENT = "app-language-change";
 
 interface LanguageContextType {
     language: Language;
@@ -11,44 +14,74 @@ interface LanguageContextType {
 
 const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
 
-export function LanguageProvider({ children }: { children: React.ReactNode }) {
-    const [language, setLanguageState] = useState<Language>("en");
+function subscribeLanguage(onStoreChange: () => void): () => void {
+    if (typeof window === "undefined") return () => {};
 
-    useEffect(() => {
-        const stored = localStorage.getItem("app_language") as Language;
-        if (stored && (stored === "en" || stored === "vn")) {
-            const timer = setTimeout(() => {
-                setLanguageState(stored);
-            }, 0);
-            return () => clearTimeout(timer);
+    const handleStorage = (e: StorageEvent) => {
+        if (e.key === null || e.key === STORAGE_KEY) {
+            onStoreChange();
+        }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(LANGUAGE_EVENT, onStoreChange);
+    return () => {
+        window.removeEventListener("storage", handleStorage);
+        window.removeEventListener(LANGUAGE_EVENT, onStoreChange);
+    };
+}
+
+function getClientLanguageSnapshot(): Language {
+    try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        return stored === "vn" || stored === "en" ? stored : "en";
+    } catch {
+        return "en";
+    }
+}
+
+function getServerLanguageSnapshot(): Language {
+    return "en";
+}
+
+export function LanguageProvider({ children }: { children: React.ReactNode }) {
+    const language = useSyncExternalStore(
+        subscribeLanguage,
+        getClientLanguageSnapshot,
+        getServerLanguageSnapshot
+    );
+
+    const setLanguage = useCallback((lang: Language) => {
+        try {
+            localStorage.setItem(STORAGE_KEY, lang);
+        } catch {
+            // Ignore storage quota or private mode restrictions.
+        }
+        if (typeof window !== "undefined") {
+            window.dispatchEvent(new Event(LANGUAGE_EVENT));
         }
     }, []);
 
-    const setLanguage = (lang: Language) => {
-        setLanguageState(lang);
-        localStorage.setItem("app_language", lang);
-    };
+    const t = useCallback(
+        (key: TranslationKey): string => translations[language][key] || translations.en[key] || key,
+        [language]
+    );
 
-    const t = (key: TranslationKey): string => {
-        return translations[language][key] || key;
-    };
-
-    // if (!isLoaded) return <>{children}</>; // This caused the crash because children use the hook immediately.
-
-    // To avoid hydration mismatch, we can just let it be 'en' initially and then update.
-    // Or we can render a loading state if we really want to wait. 
-    // But for now, let's always provide context.
+    const value = useMemo(
+        () => ({ language, setLanguage, t }),
+        [language, setLanguage, t]
+    );
 
     return (
-        <LanguageContext.Provider value={{ language, setLanguage, t }}>
+        <LanguageContext.Provider value={value}>
             {children}
         </LanguageContext.Provider>
     );
 }
 
-export function useLanguage() {
+export function useLanguage(): LanguageContextType {
     const context = useContext(LanguageContext);
-    if (context === undefined) {
+    if (!context) {
         throw new Error("useLanguage must be used within a LanguageProvider");
     }
     return context;
