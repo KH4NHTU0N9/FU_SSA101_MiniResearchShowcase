@@ -1,182 +1,262 @@
 "use client";
 
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle } from "lucide-react";
 import { PostItem } from "@/components/features/community/post-item";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { useToast } from "@/components/ui/toast";
 import { useAuth } from "@/lib/auth-context";
+import { containsProhibitedContent } from "@/lib/community/moderation";
+import type {
+    CommunityCategoryFilter,
+    CommunityComment,
+    CommunityPost,
+    PostCategoryValue,
+} from "@/types";
 
-interface Post {
-    id: string;
-    content: string;
-    category: string;
-    likes: number;
-    createdAt: string;
-    authorId: string;
-    author: { name: string; };
-    comments: Comment[];
-    likedByUser?: boolean;
-}
-
-interface Comment {
-    id: string;
-    content: string;
-    createdAt: string;
-    author: { name: string; };
-}
-
-const CATEGORIES = [
+const CATEGORIES: ReadonlyArray<{ id: CommunityCategoryFilter; label: string }> = [
     { id: "ALL", label: "All Topics" },
     { id: "ACADEMIC", label: "Academic Stress" },
     { id: "PSYCHOLOGY", label: "Psychology Q&A" },
     { id: "RESOURCES", label: "Study Resources" },
-    { id: "OTHER", label: "General Support" }
+    { id: "OTHER", label: "General Support" },
 ];
 
-const BAD_WORDS = ["kill", "die", "stupid", "hate", "ugly", "chết", "ngu", "giết", "fuck", "bitch", "shit", "ass", "cunt", "damn", "whore", "đụ", "cặc", "lồn", "rau má"];
+const PAGE_LIMIT = 10;
 
-export function CommunityFeed({ initialPosts }: { initialPosts: Post[] }) {
+export function CommunityFeed({ initialPosts }: { initialPosts: CommunityPost[] }) {
     const { user } = useAuth();
-    const [posts, setPosts] = useState<Post[]>(initialPosts);
+    const { showToast, confirmAction } = useToast();
+
+    const [posts, setPosts] = useState<CommunityPost[]>(initialPosts);
     const [newPost, setNewPost] = useState("");
-    const [selectedCategory, setSelectedCategory] = useState("ALL");
-    const [postCategory, setPostCategory] = useState("ACADEMIC");
+    const [selectedCategory, setSelectedCategory] = useState<CommunityCategoryFilter>("ALL");
+    const [postCategory, setPostCategory] = useState<PostCategoryValue>("ACADEMIC");
     const [error, setError] = useState("");
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const [replyingTo, setReplyingTo] = useState<string | null>(null);
     const [replyContent, setReplyContent] = useState("");
 
-    // Pagination State
     const [page, setPage] = useState(1);
-    const [hasMore, setHasMore] = useState(initialPosts.length >= 10);
+    const [hasMore, setHasMore] = useState(initialPosts.length >= PAGE_LIMIT);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
 
+    const fetchAbortRef = useRef<AbortController | null>(null);
+    const pendingLikesRef = useRef<Set<string>>(new Set());
+
+    useEffect(() => {
+        return () => {
+            fetchAbortRef.current?.abort();
+        };
+    }, []);
+
     const handleLoadMore = async () => {
+        if (isLoadingMore) return;
         setIsLoadingMore(true);
         const nextPage = page + 1;
+
+        fetchAbortRef.current?.abort();
+        const controller = new AbortController();
+        fetchAbortRef.current = controller;
+
         try {
-            const res = await fetch(`/api/community?page=${nextPage}&category=${selectedCategory}`);
-            if (res.ok) {
-                const newPosts = await res.json();
-                if (newPosts.length < 10) setHasMore(false);
-                setPosts([...posts, ...newPosts]);
-                setPage(nextPage);
+            const res = await fetch(
+                `/api/community?page=${nextPage}&limit=${PAGE_LIMIT}&category=${selectedCategory}`,
+                { signal: controller.signal }
+            );
+            if (!res.ok) {
+                showToast("Could not load more posts.", "error");
+                return;
             }
-        } catch {
-            console.error("Failed to load more");
+            const newPosts = (await res.json()) as CommunityPost[];
+            if (newPosts.length < PAGE_LIMIT) setHasMore(false);
+            setPosts((prev) => {
+                const seen = new Set(prev.map((p) => p.id));
+                return [...prev, ...newPosts.filter((p) => !seen.has(p.id))];
+            });
+            setPage(nextPage);
+        } catch (err) {
+            if ((err as Error)?.name !== "AbortError") {
+                showToast("Network error while loading posts.", "error");
+            }
         } finally {
             setIsLoadingMore(false);
         }
     };
 
-    // Reset pagination when category changes
-    const handleCategoryChange = async (catId: string) => {
+    const handleCategoryChange = async (catId: CommunityCategoryFilter) => {
         setSelectedCategory(catId);
         setPage(1);
         setIsLoadingMore(true);
+
+        fetchAbortRef.current?.abort();
+        const controller = new AbortController();
+        fetchAbortRef.current = controller;
+
         try {
-            const res = await fetch(`/api/community?page=1&category=${catId}`);
-            if (res.ok) {
-                const newPosts = await res.json();
-                setPosts(newPosts);
-                setHasMore(newPosts.length >= 10);
+            const res = await fetch(
+                `/api/community?page=1&limit=${PAGE_LIMIT}&category=${catId}`,
+                { signal: controller.signal }
+            );
+            if (!res.ok) {
+                showToast("Failed to filter category.", "error");
+                return;
             }
-        } catch { 
-            console.error("Failed to load category");
+            const newPosts = (await res.json()) as CommunityPost[];
+            setPosts(newPosts);
+            setHasMore(newPosts.length >= PAGE_LIMIT);
+        } catch (err) {
+            if ((err as Error)?.name !== "AbortError") {
+                showToast("Network error while loading category.", "error");
+            }
         } finally {
             setIsLoadingMore(false);
         }
     };
 
     const handlePost = async () => {
-        if (!newPost.trim()) return;
-        if (BAD_WORDS.some(word => newPost.toLowerCase().includes(word))) {
-            setError("Please keep the community fast and supportive. Negative words detected.");
+        const trimmed = newPost.trim();
+        if (!trimmed || isSubmitting) return;
+
+        if (containsProhibitedContent(trimmed)) {
+            setError("Please keep the community supportive. Prohibited words detected.");
             return;
         }
 
+        setIsSubmitting(true);
         try {
             const res = await fetch("/api/community", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ content: newPost, category: postCategory }),
+                body: JSON.stringify({ content: trimmed, category: postCategory }),
             });
 
             if (res.ok) {
-                const post = await res.json();
-                setPosts([post, ...posts]);
+                const created = (await res.json()) as CommunityPost;
+                if (selectedCategory === "ALL" || selectedCategory === created.category) {
+                    setPosts((prev) => [created, ...prev]);
+                } else {
+                    void handleCategoryChange("ALL");
+                }
                 setNewPost("");
                 setError("");
+                showToast("Post published anonymously.", "success");
             } else {
-                setError("Failed to post. Please try again.");
+                const errData = (await res.json().catch(() => ({}))) as { error?: string };
+                setError(errData.error || "Failed to post. Please try again.");
             }
         } catch {
-            setError("Network error.");
+            setError("Network error while publishing post.");
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
     const handleLike = async (id: string, currentlyLiked: boolean) => {
-        try {
-            // Optimistic update
-            setPosts(posts.map(p => p.id === id ? {
-                ...p,
-                likes: currentlyLiked ? p.likes - 1 : p.likes + 1,
-                likedByUser: !currentlyLiked
-            } : p));
+        if (pendingLikesRef.current.has(id)) return;
+        pendingLikesRef.current.add(id);
 
+        setPosts((prev) =>
+            prev.map((p) =>
+                p.id === id
+                    ? {
+                          ...p,
+                          likes: currentlyLiked ? Math.max(0, p.likes - 1) : p.likes + 1,
+                          likedByUser: !currentlyLiked,
+                      }
+                    : p
+            )
+        );
+
+        try {
             const res = await fetch(`/api/community/${id}/like`, { method: "POST" });
-            if (res.ok) {
-                const data = await res.json();
-                // Sync with server truth
-                setPosts(currentPosts => currentPosts.map(p =>
-                    p.id === id ? { ...p, likes: data.likes, likedByUser: data.liked } : p
-                ));
+            if (!res.ok) {
+                throw new Error("Failed to update like");
             }
+            const data = (await res.json()) as { likes: number; liked: boolean };
+            setPosts((currentPosts) =>
+                currentPosts.map((p) =>
+                    p.id === id ? { ...p, likes: data.likes, likedByUser: data.liked } : p
+                )
+            );
         } catch {
-            console.error("Failed to like post");
+            setPosts((currentPosts) =>
+                currentPosts.map((p) =>
+                    p.id === id
+                        ? {
+                              ...p,
+                              likes: currentlyLiked ? p.likes + 1 : Math.max(0, p.likes - 1),
+                              likedByUser: currentlyLiked,
+                          }
+                        : p
+                )
+            );
+            showToast("Could not update reaction. Please try again.", "error");
+        } finally {
+            pendingLikesRef.current.delete(id);
         }
     };
 
     const handleDelete = async (id: string) => {
-        if (!confirm("Are you sure you want to delete this post?")) return;
+        const confirmed = await confirmAction({
+            title: "Delete this post?",
+            description: "This post and its replies will be permanently removed.",
+            confirmLabel: "Delete",
+            cancelLabel: "Cancel",
+            destructive: true,
+        });
+        if (!confirmed) return;
+
         try {
             const res = await fetch(`/api/community/${id}`, { method: "DELETE" });
             if (res.ok) {
-                setPosts(posts.filter(p => p.id !== id));
+                setPosts((prev) => prev.filter((p) => p.id !== id));
+                showToast("Post deleted.", "success");
             } else {
-                alert("Failed to delete post");
+                const errData = (await res.json().catch(() => ({}))) as { error?: string };
+                showToast(errData.error || "Failed to delete post.", "error");
             }
         } catch {
-            alert("Error deleting post");
+            showToast("Network error while deleting post.", "error");
         }
     };
 
     const handleReply = async (postId: string) => {
-        if (!replyContent.trim()) return;
+        const trimmed = replyContent.trim();
+        if (!trimmed) return;
+
+        if (containsProhibitedContent(trimmed)) {
+            showToast("Please keep replies respectful and supportive.", "error");
+            return;
+        }
+
         try {
             const res = await fetch(`/api/community/${postId}/comment`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ content: replyContent }),
+                body: JSON.stringify({ content: trimmed }),
             });
 
             if (res.ok) {
-                const newComment = await res.json();
-                setPosts(posts.map(p => {
-                    if (p.id === postId) {
-                        return { ...p, comments: [...(p.comments || []), newComment] };
-                    }
-                    return p;
-                }));
+                const newComment = (await res.json()) as CommunityComment;
+                setPosts((prev) =>
+                    prev.map((p) =>
+                        p.id === postId
+                            ? { ...p, comments: [...(p.comments || []), newComment] }
+                            : p
+                    )
+                );
                 setReplyContent("");
                 setReplyingTo(null);
+            } else {
+                const errData = (await res.json().catch(() => ({}))) as { error?: string };
+                showToast(errData.error || "Failed to post reply.", "error");
             }
         } catch {
-            console.error("Failed to reply");
+            showToast("Network error while posting reply.", "error");
         }
     };
-
-
 
     return (
         <div className="max-w-4xl w-full mx-auto space-y-6">
@@ -184,15 +264,23 @@ export function CommunityFeed({ initialPosts }: { initialPosts: Post[] }) {
                 <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-teal-400 to-blue-500">
                     Community Board
                 </h1>
-                <div className="flex gap-2 overflow-x-auto pb-2 w-full md:w-auto">
-                    {CATEGORIES.map(cat => (
+                <div
+                    role="tablist"
+                    aria-label="Filter posts by category"
+                    className="flex gap-2 overflow-x-auto pb-2 w-full md:w-auto"
+                >
+                    {CATEGORIES.map((cat) => (
                         <button
                             key={cat.id}
-                            onClick={() => setSelectedCategory(cat.id)}
-                            className={`px-4 py-2 rounded-full text-xs font-medium transition-all whitespace-nowrap ${selectedCategory === cat.id
-                                ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25"
-                                : "bg-secondary/50 hover:bg-secondary text-muted-foreground"
-                                }`}
+                            type="button"
+                            role="tab"
+                            aria-selected={selectedCategory === cat.id}
+                            onClick={() => void handleCategoryChange(cat.id)}
+                            className={`px-4 py-2 rounded-full text-xs font-medium transition-all whitespace-nowrap ${
+                                selectedCategory === cat.id
+                                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25"
+                                    : "bg-secondary/50 hover:bg-secondary text-muted-foreground"
+                            }`}
                         >
                             {cat.label}
                         </button>
@@ -203,33 +291,51 @@ export function CommunityFeed({ initialPosts }: { initialPosts: Post[] }) {
             <Card className="glass-card border-primary/20">
                 <CardContent className="space-y-4 pt-6">
                     <div className="space-y-2">
-                        <label className="text-sm font-medium">Create a supportive post</label>
+                        <label htmlFor="community-post-input" className="text-sm font-medium block">
+                            Create a supportive post
+                        </label>
                         <textarea
+                            id="community-post-input"
                             className="w-full h-24 bg-background/50 border border-input rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none resize-none"
                             placeholder="Share your thoughts, ask for advice, or vent safely..."
                             value={newPost}
-                            onChange={(e) => setNewPost(e.target.value)}
+                            maxLength={2000}
+                            onChange={(e) => {
+                                setNewPost(e.target.value);
+                                if (error) setError("");
+                            }}
                         />
                     </div>
 
                     <div className="flex flex-col md:flex-row justify-between gap-4">
                         <select
+                            aria-label="Post category"
                             className="bg-accent rounded-lg px-3 py-2 text-sm focus:outline-none border border-input"
                             value={postCategory}
-                            onChange={(e) => setPostCategory(e.target.value)}
+                            onChange={(e) => setPostCategory(e.target.value as PostCategoryValue)}
                         >
-                            {CATEGORIES.filter(c => c.id !== 'ALL').map(c => (
-                                <option key={c.id} value={c.id}>{c.label}</option>
+                            {CATEGORIES.filter((c) => c.id !== "ALL").map((c) => (
+                                <option key={c.id} value={c.id}>
+                                    {c.label}
+                                </option>
                             ))}
                         </select>
-                        <Button onClick={handlePost} disabled={!newPost.trim()} className="w-full md:w-auto">
-                            Post to Community
+                        <Button
+                            onClick={() => void handlePost()}
+                            disabled={!newPost.trim() || isSubmitting}
+                            className="w-full md:w-auto"
+                        >
+                            {isSubmitting ? "Posting..." : "Post to Community"}
                         </Button>
                     </div>
 
                     {error && (
-                        <div className="text-sm text-rose-500 flex items-center gap-2 animate-pulse">
-                            <AlertCircle className="w-4 h-4" /> {error}
+                        <div
+                            role="alert"
+                            className="text-sm text-rose-500 flex items-center gap-2"
+                        >
+                            <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                            <span>{error}</span>
                         </div>
                     )}
                 </CardContent>
@@ -249,7 +355,10 @@ export function CommunityFeed({ initialPosts }: { initialPosts: Post[] }) {
                         likedByUser={post.likedByUser}
                         onLike={handleLike}
                         onDelete={handleDelete}
-                        onReply={(id) => setReplyingTo(replyingTo === id ? null : id)}
+                        onReply={(id) => {
+                            setReplyingTo(replyingTo === id ? null : id);
+                            setReplyContent("");
+                        }}
                         isReplying={replyingTo === post.id}
                         replyContent={replyContent}
                         setReplyContent={setReplyContent}
@@ -260,7 +369,11 @@ export function CommunityFeed({ initialPosts }: { initialPosts: Post[] }) {
 
                 {hasMore && (
                     <div className="flex justify-center pt-4">
-                        <Button variant="ghost" onClick={handleLoadMore} disabled={isLoadingMore}>
+                        <Button
+                            variant="ghost"
+                            onClick={() => void handleLoadMore()}
+                            disabled={isLoadingMore}
+                        >
                             {isLoadingMore ? "Loading..." : "Load More Posts"}
                         </Button>
                     </div>
