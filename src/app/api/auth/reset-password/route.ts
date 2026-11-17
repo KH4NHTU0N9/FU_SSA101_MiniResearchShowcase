@@ -1,51 +1,99 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import bcrypt from "bcryptjs";
+import {
+    guardOrigin,
+    guardRateLimit,
+    handlePrismaError,
+    jsonError,
+    parseJsonBody,
+} from "@/lib/api/response";
+import { hashPassword, verifyOtpHash } from "@/lib/security";
+import { resetPasswordSchema } from "@/lib/validation";
+
+const MAX_RESET_ATTEMPTS = 5;
 
 export async function POST(req: Request) {
     try {
-        const { email, code, newPassword } = await req.json();
+        const originError = guardOrigin(req);
+        if (originError) return originError;
 
-        if (!email || !code || !newPassword) {
-            return NextResponse.json({ error: "Missing required fields." }, { status: 400 });
-        }
+        const rateError = guardRateLimit(req, "auth:reset-password", {
+            windowMs: 15 * 60 * 1000,
+            maxRequests: 10,
+        });
+        if (rateError) return rateError;
 
-        // 1. Find user by email
+        const parsed = await parseJsonBody(req, resetPasswordSchema);
+        if (parsed.error) return parsed.error;
+
+        const { email, code, newPassword } = parsed.data;
+
         const user = await prisma.user.findUnique({
             where: { email },
-        });
-
-        if (!user) {
-            return NextResponse.json({ error: "Invalid code or email." }, { status: 400 });
-        }
-
-        // 2. Validate code and expiration
-        if (user.resetCode !== code) {
-            return NextResponse.json({ error: "Invalid reset code." }, { status: 400 });
-        }
-
-        if (!user.resetCodeExpires || new Date() > user.resetCodeExpires) {
-            return NextResponse.json({ error: "Reset code has expired. Please request a new one." }, { status: 400 });
-        }
-
-        // 3. Hash new password
-        const hashedPassword = await bcrypt.hash(newPassword, 12);
-
-        // 4. Update password and clear reset code fields
-        await prisma.user.update({
-            where: { id: user.id },
-            data: {
-                password: hashedPassword,
-                resetCode: null,
-                resetCodeExpires: null,
+            select: {
+                id: true,
+                resetCode: true,
+                resetAttempts: true,
+                resetCodeExpires: true,
             },
         });
 
-        return NextResponse.json({ message: "Password has been successfully reset." }, { status: 200 });
+        if (!user || !user.resetCode || !user.resetCodeExpires || new Date() > user.resetCodeExpires) {
+            return jsonError("Invalid or expired reset code.", 400);
+        }
 
+        if (user.resetAttempts >= MAX_RESET_ATTEMPTS) {
+            await prisma.user.update({
+                where: { id: user.id },
+                data: { resetCode: null, resetAttempts: 0, resetCodeExpires: null },
+            });
+            return jsonError("Too many failed attempts. Please request a new reset code.", 429);
+        }
+
+        if (!verifyOtpHash(email, code, user.resetCode)) {
+            const nextAttempts = user.resetAttempts + 1;
+            if (nextAttempts >= MAX_RESET_ATTEMPTS) {
+                await prisma.user.update({
+                    where: { id: user.id },
+                    data: { resetCode: null, resetAttempts: 0, resetCodeExpires: null },
+                });
+                return jsonError("Too many failed attempts. Please request a new reset code.", 429);
+            }
+            await prisma.user.update({
+                where: { id: user.id },
+                data: { resetAttempts: { increment: 1 } },
+            });
+            return jsonError("Invalid or expired reset code.", 400);
+        }
+
+        const hashedPassword = await hashPassword(newPassword);
+
+        // Conditional update prevents TOCTOU race conditions with concurrent reset attempts.
+        const updated = await prisma.user.updateMany({
+            where: {
+                id: user.id,
+                resetCode: user.resetCode,
+            },
+            data: {
+                password: hashedPassword,
+                resetCode: null,
+                resetAttempts: 0,
+                resetCodeExpires: null,
+                tokenVersion: { increment: 1 },
+            },
+        });
+
+        if (updated.count !== 1) {
+            return jsonError("Reset code has already been used.", 400);
+        }
+
+        return NextResponse.json(
+            { message: "Password has been successfully reset." },
+            { status: 200 }
+        );
     } catch (error) {
-        console.error("Reset password error:", error);
-        return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
+        return handlePrismaError(error, "auth/reset-password POST");
     }
 }
