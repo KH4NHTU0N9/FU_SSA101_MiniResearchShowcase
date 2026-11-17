@@ -1,37 +1,77 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { revalidateTag, revalidatePath } from 'next/cache';
+import {
+    guardRateLimit,
+    handlePrismaError,
+    jsonError,
+    parseJsonBody,
+    requireAuth,
+} from "@/lib/api/response";
+import { containsProhibitedContent } from "@/lib/community/moderation";
+import { invalidateCommunityCache } from "@/lib/community/queries";
+import { createCommentSchema } from "@/lib/validation";
 
-// POST: Add reply
-export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(
+    req: Request,
+    { params }: { params: Promise<{ id: string }> }
+) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
+
+        const rateError = guardRateLimit(
+            req,
+            "community:comment",
+            { windowMs: 10 * 60 * 1000, maxRequests: 30 },
+            auth.ctx.user.id
+        );
+        if (rateError) return rateError;
 
         const { id } = await params;
-        const { content } = await req.json();
+
+        const parsed = await parseJsonBody(req, createCommentSchema);
+        if (parsed.error) return parsed.error;
+
+        if (containsProhibitedContent(parsed.data.content)) {
+            return jsonError("Please keep replies respectful and supportive.", 400);
+        }
+
+        const postExists = await prisma.post.findUnique({
+            where: { id },
+            select: { id: true },
+        });
+        if (!postExists) {
+            return jsonError("Post not found", 404);
+        }
 
         const comment = await prisma.comment.create({
             data: {
                 postId: id,
-                authorId: session.user.id,
-                content
+                authorId: auth.ctx.user.id,
+                content: parsed.data.content,
             },
-            include: { author: { select: { name: true } } }
+            select: {
+                id: true,
+                postId: true,
+                authorId: true,
+                content: true,
+                createdAt: true,
+            },
         });
 
-        // @ts-expect-error TypeScript doesn't know about stream body typing fully
-        revalidateTag('community-posts');
-        revalidatePath('/community');
+        invalidateCommunityCache();
 
-        return NextResponse.json(comment);
+        return NextResponse.json(
+            {
+                ...comment,
+                createdAt: comment.createdAt.toISOString(),
+                author: { name: "Anonymous" },
+            },
+            { status: 201 }
+        );
     } catch (error) {
-        console.error("Comment error", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "community comment POST");
     }
 }
