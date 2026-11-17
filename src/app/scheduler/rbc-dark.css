@@ -1,9 +1,14 @@
 /* ============================================
-   react-big-calendar Dynamic Theme Override
-   FULLY CLEAN - zero grid lines inside calendar
+   react-big-calendar Unified Theme Overrides
+   Supports both Light and Dark themes via CSS variables
    ============================================ */
 
-/* === KILL ALL INTERNAL BORDERS === */
+.rbc-calendar {
+    font-family: inherit;
+    color: hsl(var(--foreground));
+    min-height: 900px;
+}
+
 .rbc-time-slot,
 .rbc-day-slot .rbc-time-slot {
     border: none !important;
@@ -11,29 +16,27 @@
 
 .rbc-timeslot-group {
     border: none !important;
-    min-height: 70px !important; /* MATCH page.tsx 70px */
+    min-height: 70px !important;
 }
 
 .rbc-day-bg,
-.rbc-day-bg+.rbc-day-bg {
-    border: none !important;
+.rbc-day-bg + .rbc-day-bg {
+    border-left: 1px solid hsl(var(--border) / 0.25) !important;
 }
 
-/* Kill column dividers inside time grid */
-.rbc-time-content>*+*>* {
-    border-left: none !important;
+.rbc-time-content > * + * > * {
+    border-left: 1px solid hsl(var(--border) / 0.25) !important;
 }
 
-/* Kill row in time content */
 .rbc-time-content {
     border-top: 1px solid hsl(var(--border) / 0.5) !important;
 }
 
-/* Subtle outer border only */
 .rbc-time-view {
     border: 1px solid hsl(var(--border) / 0.8) !important;
     border-radius: 0.5rem !important;
     overflow: hidden !important;
+    flex: 1;
 }
 
 .rbc-time-header.rbc-overflowing {
@@ -42,14 +45,13 @@
 
 .rbc-time-header-content {
     border-left: 1px solid hsl(var(--border) / 0.8) !important;
+    color: hsl(var(--foreground)) !important;
 }
 
-/* Gutter right border */
 .rbc-time-gutter .rbc-timeslot-group {
     border-right: 1px solid hsl(var(--border) / 0.8) !important;
 }
 
-/* === HEADER === */
 .rbc-header {
     border-bottom: 1px solid hsl(var(--border) / 0.8) !important;
     border-left: none !important;
@@ -69,11 +71,10 @@
     color: inherit !important;
 }
 
-.rbc-header+.rbc-header {
+.rbc-header + .rbc-header {
     border-left: 1px solid hsl(var(--border) / 0.8) !important;
 }
 
-/* === TOOLBAR === */
 .rbc-toolbar {
     padding: 8px 4px !important;
     margin-bottom: 8px !important;
@@ -93,6 +94,7 @@
 
 .rbc-toolbar button:active,
 .rbc-toolbar button.rbc-active {
+    background-image: none !important;
     background-color: hsl(var(--primary)) !important;
     border-color: hsl(var(--primary)) !important;
     color: hsl(var(--primary-foreground)) !important;
@@ -104,52 +106,58 @@
     color: hsl(var(--foreground)) !important;
 }
 
-/* === TODAY === */
 .rbc-today {
     background-color: hsl(var(--primary) / 0.05) !important;
 }
 
-/* === EVENTS === */
 .rbc-event {
     border: none !important;
     border-radius: 6px !important;
     opacity: 0.95 !important;
-    padding: 0 !important; /* CustomEvent handles padding */
+    padding: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
     overflow: visible !important;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
 }
 
 .rbc-event:focus {
     outline: none !important;
-    box-shadow: none !important;
+    box-shadow: 0 0 0 2px hsl(var(--ring)) !important;
 }
 
-/* === TIME LABEL === */
+.rbc-event-content {
+    overflow: visible !important;
+    padding: 4px 8px !important;
+    font-size: 0.85rem !important;
+    font-weight: 600 !important;
+    line-height: 1.2 !important;
+    white-space: normal !important;
+    word-break: break-word !important;
+}
+
+.rbc-event-label {
+    display: none !important;
+}
+
 .rbc-label {
-    font-size: 0.62rem !important;
+    font-size: 0.65rem !important;
     color: hsl(var(--muted-foreground)) !important;
     padding: 0 8px !important;
     white-space: nowrap !important;
 }
 
-/* === CURRENT TIME === */
 .rbc-current-time-indicator {
     background-color: hsl(var(--primary)) !important;
     height: 2px !important;
     opacity: 0.75 !important;
 }
 
-/* === SHOW MORE === */
 .rbc-show-more {
     color: hsl(var(--primary)) !important;
     font-size: 0.7rem !important;
 }
 
-/* === OFF RANGE === */
 .rbc-off-range-bg {
     background: hsl(var(--muted) / 0.3) !important;
-}
-
-/* Hide default RBC time label in events */
-.rbc-event-label {
-    display: none !important;
 }
