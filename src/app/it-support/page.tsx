@@ -4,71 +4,68 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Settings, Info, Calculator, Cpu, Binary, FastForward, ArrowRightLeft, BookOpen, Sparkles, Loader2, X, BarChart2, Play, Square, RefreshCw, Search, Terminal } from 'lucide-react';
 
 // ==========================================
-// GEMINI API LÕI (AI TUTOR)
+// AI TUTOR SERVER PROXY (/api/it-support/ai)
 // ==========================================
-const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || ""; 
+const askGemini = async (context: string, signal?: AbortSignal): Promise<string> => {
+  const response = await fetch("/api/it-support/ai", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({ context: context.slice(0, 2000) }),
+  });
 
-const askGemini = async (prompt: string) => {
-  if (!apiKey) {
-    throw new Error("Vui lòng cấu hình NEXT_PUBLIC_GEMINI_API_KEY trong .env.local để sử dụng tính năng này.");
+  const data = (await response.json().catch(() => ({}))) as {
+    explanation?: string;
+    error?: string;
+  };
+
+  if (!response.ok) {
+    throw new Error(data.error || `Lỗi kết nối AI (${response.status})`);
   }
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`;
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    systemInstruction: { 
-      parts: [{ text: "Bạn là một giáo sư Khoa học Máy tính tận tâm. Hãy giải thích ngắn gọn, dễ hiểu, từng bước một bằng tiếng Việt. Phân tích độ phức tạp thời gian (Big O), cơ chế hoạt động, và trích dẫn chuẩn xác từ sách Introduction to Algorithms (CLRS)." }] 
-    }
-  };
 
-  const fetchWithRetry = async (retries = 5, delay = 1000): Promise<string> => {
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!response.ok) throw new Error(`Lỗi API: ${response.status}`);
-      const data = await response.json();
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || "Không có phản hồi từ AI.";
-    } catch (error: unknown) {
-      if (retries > 0) {
-        await new Promise(res => setTimeout(res, delay));
-        return fetchWithRetry(retries - 1, delay * 2);
-      }
-      if (error instanceof Error) {
-        throw new Error(error.message || "Lỗi kết nối AI sau nhiều lần thử. Vui lòng thử lại sau.");
-      } else {
-        throw new Error("Lỗi kết nối AI sau nhiều lần thử. Vui lòng thử lại sau.");
-      }
-    }
-  };
-  return fetchWithRetry();
+  return data.explanation || "Không có phản hồi từ AI.";
 };
 
 const AiTutor = ({ context }: { context: string }) => {
   const [response, setResponse] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
     setResponse('');
     setError('');
+    setLoading(false);
+    return () => {
+      abortRef.current?.abort();
+    };
   }, [context]);
 
   const handleAsk = async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
     setError('');
     try {
-      const res = await askGemini(context);
-      setResponse(res);
+      const res = await askGemini(context, controller.signal);
+      if (!controller.signal.aborted) {
+        setResponse(res);
+      }
     } catch (err: unknown) {
+      if ((err as Error)?.name === 'AbortError') return;
       if (err instanceof Error) {
         setError(err.message);
       } else {
         setError("An unknown error occurred.");
       }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
@@ -102,7 +99,7 @@ const AiTutor = ({ context }: { context: string }) => {
       {error && <div className="text-rose-600 text-sm bg-rose-50 p-3 rounded">{error}</div>}
       {response && (
         <div className="bg-gradient-to-br from-indigo-50 to-violet-50 border border-indigo-100 rounded-xl p-6 relative shadow-sm">
-           <button onClick={() => setResponse('')} className="absolute top-4 right-4 text-indigo-400 hover:text-indigo-600 bg-white rounded-full p-1 shadow-sm transition-colors"><X size={16}/></button>
+           <button type="button" onClick={() => setResponse('')} aria-label="Đóng phản hồi AI" className="absolute top-4 right-4 text-indigo-400 hover:text-indigo-600 bg-white rounded-full p-1 shadow-sm transition-colors"><X size={16} aria-hidden="true"/></button>
            <h4 className="flex items-center gap-2 text-indigo-800 font-bold mb-4 pb-2 border-b border-indigo-200/50">
              <Sparkles size={20} className="text-indigo-600"/> Phân tích từ Giáo sư AI:
            </h4>
@@ -450,6 +447,12 @@ export default function ITSearch() {
   const [searchTarget, setSearchTarget] = useState(50);
   
   const isRunningRef = useRef(false);
+  const speedRef = useRef(speed);
+  const animTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    speedRef.current = speed;
+  }, [speed]);
 
   const tabs = [
     { id: 'logic', name: '1. Toán tử Logic', icon: Cpu },
@@ -463,6 +466,10 @@ export default function ITSearch() {
 
   const generateRandomArray = () => {
     isRunningRef.current = false;
+    if (animTimerRef.current) {
+      clearTimeout(animTimerRef.current);
+      animTimerRef.current = null;
+    }
     setIsRunning(false);
     setActiveIndices([]);
     setSortedIndices([]);
@@ -489,13 +496,39 @@ export default function ITSearch() {
   };
 
   useEffect(() => {
+    isRunningRef.current = false;
     if (['sort', 'search'].includes(activeTab)) {
       const timer = setTimeout(() => {
-        generateRandomArray();
+        setIsRunning(false);
+        setActiveIndices([]);
+        setSortedIndices([]);
+        setFoundIndex(null);
+        setActiveRange(null);
+        setStepMessage('');
+
+        const arr = Array.from({ length: 25 }, () => Math.floor(Math.random() * 90) + 10);
+        if (activeTab === 'search' && searchAlgo === 'BINARY') {
+          arr.sort((a, b) => a - b);
+        }
+        setDataArray(arr);
+        if (activeTab === 'search') {
+          setSearchTarget(
+            Math.random() > 0.3
+              ? arr[Math.floor(Math.random() * arr.length)]
+              : Math.floor(Math.random() * 90) + 10
+          );
+        }
       }, 0);
-      return () => clearTimeout(timer);
+      return () => {
+        clearTimeout(timer);
+        isRunningRef.current = false;
+        if (animTimerRef.current) clearTimeout(animTimerRef.current);
+      };
     }
-    return () => { isRunningRef.current = false; };
+    return () => {
+      isRunningRef.current = false;
+      if (animTimerRef.current) clearTimeout(animTimerRef.current);
+    };
   }, [activeTab, searchAlgo]);
 
   const runAnimationLoop = async (frames: Frame[]) => {
@@ -531,8 +564,10 @@ export default function ITSearch() {
         setActiveIndices([]);
       }
 
-      const delay = 505 - (speed * 5);
-      await new Promise(r => setTimeout(r, delay));
+      const delay = Math.max(10, 505 - speedRef.current * 5);
+      await new Promise<void>(r => {
+        animTimerRef.current = setTimeout(r, delay);
+      });
     }
 
     if (isRunningRef.current && activeTab === 'sort') {
@@ -781,10 +816,10 @@ export default function ITSearch() {
                 </div>
                 <div className="flex-1 min-w-[150px]">
                   <label className="block text-sm font-bold text-slate-700 mb-2">Tốc độ</label>
-                  <input type="range" min="1" max="100" value={speed} onChange={e => setSpeed(Number(e.target.value))} className="w-full h-2 bg-slate-200 rounded-lg accent-indigo-600 cursor-pointer"/>
+                  <input type="range" aria-label="Tốc độ mô phỏng tìm kiếm" min="1" max="100" value={speed} onChange={e => setSpeed(Number(e.target.value))} className="w-full h-2 bg-slate-200 rounded-lg accent-indigo-600 cursor-pointer"/>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={generateRandomArray} disabled={isRunning} className="flex items-center gap-2 px-4 py-2.5 bg-slate-200 hover:bg-slate-300 font-bold rounded-lg disabled:opacity-50"><RefreshCw size={18} /></button>
+                  <button type="button" onClick={generateRandomArray} disabled={isRunning} aria-label="Tạo mảng ngẫu nhiên mới" className="flex items-center gap-2 px-4 py-2.5 bg-slate-200 hover:bg-slate-300 font-bold rounded-lg disabled:opacity-50"><RefreshCw size={18} aria-hidden="true" /></button>
                   {!isRunning ? (<button onClick={handleStartSearch} className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white transition-all font-bold rounded-lg shadow-md hover:shadow-lg"><Search size={18} /> Tìm</button>) : (<button onClick={handleStop} className="flex items-center gap-2 px-5 py-2.5 bg-rose-600 text-white font-bold rounded-lg animate-pulse"><Square size={18} /> Dừng</button>)}
                 </div>
               </div>
