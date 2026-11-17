@@ -1,24 +1,29 @@
-import { NextResponse } from 'next/server';
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { handlePrismaError, requireAuth } from "@/lib/api/response";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
-
-// GET: Fetch all semesters with their subjects (for dropdowns)
 export async function GET() {
     try {
+        const auth = await requireAuth();
+        if (auth.error) return auth.error;
+
         const semesters = await prisma.semester.findMany({
-            orderBy: { name: 'asc' },
-            include: {
+            orderBy: { name: "asc" },
+            select: {
+                id: true,
+                name: true,
                 subjects: {
-                    orderBy: { code: 'asc' }
-                }
-            }
+                    orderBy: { code: "asc" },
+                    select: { id: true, code: true },
+                },
+            },
         });
 
         return NextResponse.json(semesters);
     } catch (error) {
-        console.error('[exam-materials/filters GET ERROR]', error instanceof Error ? error.stack : error, JSON.stringify(error));
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "exam-materials/filters GET");
     }
 }
