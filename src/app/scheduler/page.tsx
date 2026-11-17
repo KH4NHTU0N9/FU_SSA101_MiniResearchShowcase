@@ -7,7 +7,7 @@ import { Calendar as BigCalendar, dateFnsLocalizer, type EventProps } from "reac
 import withDragAndDrop, {
     type EventInteractionArgs,
 } from "react-big-calendar/lib/addons/dragAndDrop";
-import { Calendar, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { Calendar, RotateCcw } from "lucide-react";
 import ProtectedRoute from "@/components/layout/protected-route";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,8 +18,17 @@ import {
     CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/toast";
+import {
+    EverydayTasksPanel,
+    type EverydayTaskGroup,
+    type TaskDraft,
+} from "@/components/features/scheduler/everyday-tasks-panel";
+import {
+    FixedEventsPanel,
+    type FixedEventDraft,
+} from "@/components/features/scheduler/fixed-events-panel";
+import { IndividualTasksPanel } from "@/components/features/scheduler/individual-tasks-panel";
 import {
     DAYS_ORDER,
     WEEKDAY_ONLY,
@@ -31,7 +40,6 @@ import {
     generateWeeklySchedule,
     isValidTimeWindow,
 } from "@/lib/scheduler/algorithm";
-import { cn } from "@/lib/utils";
 import type {
     AssignedSlot,
     FixedEventDTO,
@@ -114,20 +122,15 @@ function SchedulerContent() {
     const [allowedStartTime, setAllowedStartTime] = useState("08:00");
     const [allowedEndTime, setAllowedEndTime] = useState("22:00");
 
-    const [newEvent, setNewEvent] = useState<{
-        name: string;
-        day: WeekdayName;
-        startTime: string;
-        endTime: string;
-    }>({
+    const [newEvent, setNewEvent] = useState<FixedEventDraft>({
         name: "",
         day: "Monday",
         startTime: "08:00",
         endTime: "10:00",
     });
-    const [everydayTask, setEverydayTask] = useState({ name: "", duration: 1 });
+    const [everydayTask, setEverydayTask] = useState<TaskDraft>({ name: "", duration: 1 });
     const [includeWeekends, setIncludeWeekends] = useState(true);
-    const [normalTask, setNormalTask] = useState({ name: "", duration: 1 });
+    const [normalTask, setNormalTask] = useState<TaskDraft>({ name: "", duration: 1 });
     const [isLoading, setIsLoading] = useState(true);
     const [repeatWeeks, setRepeatWeeks] = useState(4);
 
@@ -557,8 +560,8 @@ function SchedulerContent() {
         }
     };
 
-    const everydayTaskGroups = useMemo(() => {
-        const map = new Map<string, SchedulerTaskDTO & { daysCount: number }>();
+    const everydayTaskGroups = useMemo<EverydayTaskGroup[]>(() => {
+        const map = new Map<string, EverydayTaskGroup>();
         for (const task of tasks) {
             if (!task.groupId) continue;
             const existing = map.get(task.groupId);
@@ -625,325 +628,31 @@ function SchedulerContent() {
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     <div className="space-y-6 lg:col-span-1">
-                        <Card className="glass-card" id="fixed-schedule-form">
-                            <CardHeader className="pb-3">
-                                <CardTitle className="text-lg">1. Fixed Schedule</CardTitle>
-                                <CardDescription>Classes, part-time jobs, etc.</CardDescription>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                                <div className="space-y-2">
-                                    <Label htmlFor="fixed-event-name">Activity Name</Label>
-                                    <Input
-                                        id="fixed-event-name"
-                                        placeholder="e.g. Calculus Class"
-                                        value={newEvent.name}
-                                        onChange={(e) =>
-                                            setNewEvent({ ...newEvent, name: e.target.value })
-                                        }
-                                    />
-                                </div>
-                                <div className="space-y-3">
-                                    <div className="space-y-2">
-                                        <Label htmlFor="fixed-event-day">Day</Label>
-                                        <select
-                                            id="fixed-event-day"
-                                            className="w-full h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                            value={newEvent.day}
-                                            onChange={(e) =>
-                                                setNewEvent({
-                                                    ...newEvent,
-                                                    day: e.target.value as WeekdayName,
-                                                })
-                                            }
-                                        >
-                                            {DAYS_ORDER.map((d) => (
-                                                <option key={d} value={d}>
-                                                    {d}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label>Time</Label>
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                aria-label="Fixed event start time"
-                                                type="time"
-                                                className="flex-1 min-w-0 text-sm h-10 px-2"
-                                                value={newEvent.startTime}
-                                                onChange={(e) =>
-                                                    setNewEvent({
-                                                        ...newEvent,
-                                                        startTime: e.target.value,
-                                                    })
-                                                }
-                                            />
-                                            <span className="text-muted-foreground flex-shrink-0">
-                                                –
-                                            </span>
-                                            <Input
-                                                aria-label="Fixed event end time"
-                                                type="time"
-                                                className="flex-1 min-w-0 text-sm h-10 px-2"
-                                                value={newEvent.endTime}
-                                                onChange={(e) =>
-                                                    setNewEvent({
-                                                        ...newEvent,
-                                                        endTime: e.target.value,
-                                                    })
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-                                </div>
-                                <Button
-                                    type="button"
-                                    className="w-full"
-                                    variant="secondary"
-                                    onClick={() => void addFixedEvent()}
-                                    disabled={!newEvent.name.trim()}
-                                >
-                                    <Plus className="w-4 h-4 mr-2" aria-hidden="true" /> Add Fixed
-                                    Event
-                                </Button>
+                        <FixedEventsPanel
+                            fixedEvents={fixedEvents}
+                            newEvent={newEvent}
+                            onChangeNewEvent={setNewEvent}
+                            onAdd={() => void addFixedEvent()}
+                            onRemove={(id) => void removeFixed(id)}
+                        />
 
-                                <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2">
-                                    {fixedEvents.map((ev) => (
-                                        <div
-                                            key={ev.id}
-                                            className="flex justify-between items-center text-sm p-2 bg-secondary/10 rounded-md border border-secondary/20"
-                                        >
-                                            <div>
-                                                <span className="font-semibold block">
-                                                    {ev.name}
-                                                </span>
-                                                <span className="text-muted-foreground">
-                                                    {ev.day.slice(0, 3)} {ev.startTime}-{ev.endTime}
-                                                </span>
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => void removeFixed(ev.id)}
-                                                aria-label={`Remove fixed event ${ev.name}`}
-                                                className="text-muted-foreground hover:text-red-500"
-                                            >
-                                                <Trash2 className="w-4 h-4" aria-hidden="true" />
-                                            </button>
-                                        </div>
-                                    ))}
-                                    {fixedEvents.length === 0 && (
-                                        <p className="text-xs text-center text-muted-foreground py-2">
-                                            No fixed events yet.
-                                        </p>
-                                    )}
-                                </div>
-                            </CardContent>
-                        </Card>
+                        <EverydayTasksPanel
+                            everydayTask={everydayTask}
+                            onChangeEverydayTask={setEverydayTask}
+                            includeWeekends={includeWeekends}
+                            onChangeIncludeWeekends={setIncludeWeekends}
+                            everydayTaskGroups={everydayTaskGroups}
+                            onAdd={() => void addEverydayTask()}
+                            onRemoveGroup={(task) => void removeTask(task)}
+                        />
 
-                        <Card className="glass-card">
-                            <CardHeader className="pb-3">
-                                <CardTitle className="text-lg">2. Task To Do Everyday</CardTitle>
-                                <CardDescription>
-                                    Schedules a recurring daily block across your week.
-                                </CardDescription>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                                <div className="space-y-2">
-                                    <Label htmlFor="everyday-task-name">Everyday Task Name</Label>
-                                    <Input
-                                        id="everyday-task-name"
-                                        placeholder="e.g. Morning Jog"
-                                        value={everydayTask.name}
-                                        onChange={(e) =>
-                                            setEverydayTask({
-                                                ...everydayTask,
-                                                name: e.target.value,
-                                            })
-                                        }
-                                    />
-                                </div>
-                                <div className="space-y-2">
-                                    <Label>Duration (Hours)</Label>
-                                    <div className="flex gap-2">
-                                        {[1, 2, 3].map((h) => (
-                                            <button
-                                                key={h}
-                                                type="button"
-                                                onClick={() =>
-                                                    setEverydayTask({
-                                                        ...everydayTask,
-                                                        duration: h,
-                                                    })
-                                                }
-                                                className={cn(
-                                                    "flex-1 py-2 rounded-md border text-sm transition-all",
-                                                    everydayTask.duration === h
-                                                        ? "bg-primary text-primary-foreground border-primary"
-                                                        : "bg-transparent hover:bg-muted"
-                                                )}
-                                            >
-                                                {h}h
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                <div className="flex items-center space-x-2 py-2">
-                                    <input
-                                        type="checkbox"
-                                        id="weekends"
-                                        checked={includeWeekends}
-                                        onChange={(e) => setIncludeWeekends(e.target.checked)}
-                                        className="rounded border-input bg-background w-4 h-4 text-primary focus:ring-primary"
-                                    />
-                                    <Label
-                                        htmlFor="weekends"
-                                        className="text-sm font-normal cursor-pointer text-muted-foreground"
-                                    >
-                                        Include Weekends (Sat-Sun)
-                                    </Label>
-                                </div>
-                                <Button
-                                    type="button"
-                                    className="w-full"
-                                    variant="secondary"
-                                    onClick={() => void addEverydayTask()}
-                                    disabled={!everydayTask.name.trim()}
-                                >
-                                    <Plus className="w-4 h-4 mr-2" aria-hidden="true" /> Add
-                                    Everyday Task
-                                </Button>
-
-                                {everydayTaskGroups.length > 0 && (
-                                    <div className="space-y-2 pt-3 border-t border-border">
-                                        <Label className="text-xs text-muted-foreground block">
-                                            Added Everyday Tasks
-                                        </Label>
-                                        {everydayTaskGroups.map((groupTask) => (
-                                            <div
-                                                key={groupTask.groupId}
-                                                className="flex justify-between items-center text-sm p-2 bg-primary/10 rounded-md border border-primary/20"
-                                            >
-                                                <div className="flex items-center gap-2 min-w-0">
-                                                    <span className="font-semibold text-primary truncate">
-                                                        {groupTask.name}
-                                                    </span>
-                                                    <span className="px-1.5 py-0.5 rounded-full bg-primary/20 text-primary text-[10px] shrink-0">
-                                                        {groupTask.duration}h ·{" "}
-                                                        {groupTask.daysCount}d/wk
-                                                    </span>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => void removeTask(groupTask)}
-                                                    aria-label={`Remove recurring task ${groupTask.name}`}
-                                                    className="text-muted-foreground hover:text-red-500 shrink-0"
-                                                >
-                                                    <Trash2
-                                                        className="w-4 h-4"
-                                                        aria-hidden="true"
-                                                    />
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </CardContent>
-                        </Card>
-
-                        <Card className="glass-card">
-                            <CardHeader className="pb-3">
-                                <CardTitle className="text-lg">3. Tasks To Do</CardTitle>
-                                <CardDescription>Flexible items to fit in once.</CardDescription>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                                <div className="space-y-2">
-                                    <Label htmlFor="normal-task-name">Task Name</Label>
-                                    <Input
-                                        id="normal-task-name"
-                                        placeholder="e.g. Study Math"
-                                        value={normalTask.name}
-                                        onChange={(e) =>
-                                            setNormalTask({ ...normalTask, name: e.target.value })
-                                        }
-                                    />
-                                </div>
-                                <div className="space-y-2">
-                                    <Label>Duration (Hours)</Label>
-                                    <div className="flex gap-2">
-                                        {[1, 2, 3, 4].map((h) => (
-                                            <button
-                                                key={h}
-                                                type="button"
-                                                onClick={() =>
-                                                    setNormalTask({ ...normalTask, duration: h })
-                                                }
-                                                className={cn(
-                                                    "flex-1 py-2 rounded-md border text-sm transition-all",
-                                                    normalTask.duration === h
-                                                        ? "bg-primary text-primary-foreground border-primary"
-                                                        : "bg-transparent hover:bg-muted"
-                                                )}
-                                            >
-                                                {h}h
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                <Button
-                                    type="button"
-                                    className="w-full"
-                                    variant="secondary"
-                                    onClick={() => void addNormalTask()}
-                                    disabled={!normalTask.name.trim()}
-                                >
-                                    <Plus className="w-4 h-4 mr-2" aria-hidden="true" /> Add Task
-                                </Button>
-
-                                <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2 border-t border-border pt-3">
-                                    <Label className="text-xs text-muted-foreground mb-2 block">
-                                        Individual Tasks
-                                    </Label>
-                                    {normalTasks.map((t) => (
-                                        <div
-                                            key={t.id}
-                                            className={cn(
-                                                "flex justify-between items-center text-sm p-2 rounded-md border",
-                                                t.assignedSlot
-                                                    ? "bg-secondary/10 border-secondary/20"
-                                                    : "bg-red-500/10 border-red-500/20"
-                                            )}
-                                        >
-                                            <div className="flex flex-col">
-                                                <div className="flex items-center">
-                                                    <span className="font-semibold">{t.name}</span>
-                                                    <span className="ml-2 px-1.5 py-0.5 rounded-full bg-primary/10 text-primary text-xs">
-                                                        {t.duration}h
-                                                    </span>
-                                                </div>
-                                                {!t.assignedSlot && (
-                                                    <span className="text-[10px] text-red-400">
-                                                        Not scheduled (no space)
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => void removeTask(t)}
-                                                aria-label={`Remove task ${t.name}`}
-                                                className="text-muted-foreground hover:text-red-500"
-                                            >
-                                                <Trash2 className="w-4 h-4" aria-hidden="true" />
-                                            </button>
-                                        </div>
-                                    ))}
-                                    {normalTasks.length === 0 && (
-                                        <p className="text-xs text-center text-muted-foreground py-2">
-                                            No individual tasks added.
-                                        </p>
-                                    )}
-                                </div>
-                            </CardContent>
-                        </Card>
+                        <IndividualTasksPanel
+                            normalTask={normalTask}
+                            onChangeNormalTask={setNormalTask}
+                            normalTasks={normalTasks}
+                            onAdd={() => void addNormalTask()}
+                            onRemoveTask={(task) => void removeTask(task)}
+                        />
                     </div>
 
                     <div className="lg:col-span-2">
