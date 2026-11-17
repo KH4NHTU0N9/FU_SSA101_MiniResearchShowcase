@@ -1,52 +1,37 @@
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
-import { CommunityFeed } from "@/components/features/community/community-feed";
 import { getSession } from "@/lib/session";
+import { fetchCommunityPosts } from "@/lib/community/queries";
+import { CommunityFeed } from "@/components/features/community/community-feed";
+import type { CommunityPost } from "@/types";
 
 export async function CommunityPosts() {
+    const session = await getSession();
+    if (!session?.user?.id) {
+        redirect("/login");
+    }
+
+    const dbUser = await prisma.user
+        .findUnique({
+            where: { id: session.user.id },
+            select: { id: true, tokenVersion: true },
+        })
+        .catch(() => null);
+
+    if (!dbUser || dbUser.tokenVersion !== session.user.tokenVersion) {
+        redirect("/login");
+    }
+
+    let initialPosts: CommunityPost[] = [];
     try {
-        const session = await getSession();
-        const userId = session?.user?.id;
-
-        const initialPosts = await prisma.post.findMany({
-            take: 10,
-            include: {
-                author: {
-                    select: { name: true, email: true }
-                },
-                comments: {
-                    include: {
-                        author: { select: { name: true } }
-                    },
-                    orderBy: { createdAt: 'asc' }
-                },
-                ...(userId ? { postLikes: { where: { userId } } } : {})
-            },
-            orderBy: { createdAt: 'desc' }
+        initialPosts = await fetchCommunityPosts({
+            page: 1,
+            limit: 10,
+            currentUserId: dbUser.id,
         });
-
-        // Serialize dates for Client Component
-        const serializedPosts = initialPosts.map((post) => ({
-            ...post,
-            likedByUser: !!(post.postLikes && post.postLikes.length > 0),
-            createdAt: post.createdAt.toISOString(),
-            author: {
-                ...post.author,
-                name: post.author?.name || "Anonymous"
-            },
-            comments: post.comments.map((c) => ({
-                ...c,
-                createdAt: c.createdAt.toISOString(),
-                author: {
-                    ...c.author,
-                    name: c.author?.name || "Anonymous"
-                }
-            }))
-        }));
-
-        return <CommunityFeed initialPosts={serializedPosts} />;
     } catch (error) {
         console.error("[CommunityPosts SSR Error]", error);
-        // Return a graceful fallback instead of crashing the whole page
-        return <CommunityFeed initialPosts={[]} />;
     }
+
+    return <CommunityFeed initialPosts={initialPosts} />;
 }
