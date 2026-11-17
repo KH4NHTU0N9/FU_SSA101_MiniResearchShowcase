@@ -1,44 +1,47 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/session";
-import { prisma } from "@/lib/prisma";
-
 export const dynamic = "force-dynamic";
 
-// GET: Fetch Latest Assessment
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { handlePrismaError, parseJsonBody, requireAuth } from "@/lib/api/response";
+import { createAssessmentSchema } from "@/lib/validation";
+
 export async function GET() {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    try {
+        const auth = await requireAuth();
+        if (auth.error) return auth.error;
 
-    const latest = await prisma.assessment.findFirst({
-        where: { userId: session.user.id },
-        orderBy: { createdAt: 'desc' }
-    });
+        const latest = await prisma.assessment.findFirst({
+            where: { userId: auth.ctx.user.id },
+            orderBy: { createdAt: "desc" },
+        });
 
-    return NextResponse.json(latest);
+        return NextResponse.json(latest);
+    } catch (error) {
+        return handlePrismaError(error, "assessment GET");
+    }
 }
 
-// POST: Save Assessment Result
 export async function POST(req: NextRequest) {
     try {
-        const session = await getSession();
-        if (!session) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
-        const body = await req.json(); // { scores: { Depression, Anxiety, Stress } }
+        const parsed = await parseJsonBody(req, createAssessmentSchema);
+        if (parsed.error) return parsed.error;
+
+        const { Depression, Anxiety, Stress } = parsed.data.scores;
 
         const assessment = await prisma.assessment.create({
             data: {
-                userId: session.user.id,
-                depressionScore: body.scores.Depression,
-                anxietyScore: body.scores.Anxiety,
-                stressScore: body.scores.Stress
-            }
+                userId: auth.ctx.user.id,
+                depressionScore: Depression,
+                anxietyScore: Anxiety,
+                stressScore: Stress,
+            },
         });
 
-        return NextResponse.json(assessment);
+        return NextResponse.json(assessment, { status: 201 });
     } catch (error) {
-        console.error("POST /api/assessment error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "assessment POST");
     }
 }
