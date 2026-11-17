@@ -1,240 +1,96 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { Bot, Send, User, PhoneCall, RotateCcw } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Bot, PhoneCall, RotateCcw, Send, User } from "lucide-react";
 import ProtectedRoute from "@/components/layout/protected-route";
 import { ProfessionalHelpModal } from "@/components/features/professional-help-modal";
-import ReactMarkdown from "react-markdown";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { useToast } from "@/components/ui/toast";
+import { detectCrisisRisk } from "@/lib/chat/risk";
+import { cn } from "@/lib/utils";
+import type { ChatMessageDTO } from "@/types";
 
-
-
-interface Message {
-    id: string;
-    role: "user" | "bot";
-    text: string;
-    timestamp: Date;
-    type?: "normal" | "risk";
+interface UiChatMessage extends ChatMessageDTO {
+    isSynthetic?: boolean;
 }
 
-type Sentiment = "risk" | "academic_stress" | "general_stress" | "sadness" | "anxiety" | "distracted" | "positive" | "greeting" | "neutral" | "question";
+const MAX_CONTEXT_MESSAGES = 39;
 
-interface ChatState {
-    currentTopic: Sentiment | null;
-    interactionCount: number;
-    lastSentiment: Sentiment | null;
-}
-
-const INITIAL_STATE: ChatState = {
-    currentTopic: null,
-    interactionCount: 0,
-    lastSentiment: null
-};
-
-// Keyword Dictionary with weighting
-const KEYWORDS: Record<string, Sentiment> = {
-    // Risk
-    "kill": "risk", "suicide": "risk", "die": "risk", "dead": "risk", "hurt myself": "risk", "end it": "risk",
-
-    // Academic
-    "exam": "academic_stress", "test": "academic_stress", "study": "academic_stress",
-    "grade": "academic_stress", "fail": "academic_stress", "school": "academic_stress",
-    "homework": "academic_stress", "deadline": "academic_stress", "assignment": "academic_stress",
-
-    // Anxiety
-    "anxious": "anxiety", "worried": "anxiety", "scared": "anxiety", "panic": "anxiety", "nervous": "anxiety", "dread": "anxiety",
-
-    // Sadness
-    "sad": "sadness", "cry": "sadness", "lonely": "sadness", "hopeless": "sadness", "depressed": "sadness", "empty": "sadness",
-
-    // General Stress
-    "stress": "general_stress", "tired": "general_stress", "exhausted": "general_stress", "overwhelmed": "general_stress", "burnout": "general_stress",
-
-    // Distracted
-    "focus": "distracted", "concentrate": "distracted", "procrastinate": "distracted", "lazy": "distracted", "distracted": "distracted",
-
-    // Positive
-    "happy": "positive", "good": "positive", "great": "positive", "excited": "positive", "better": "positive", "proud": "positive",
-
-    // Greeting
-    "hello": "greeting", "hi": "greeting", "hey": "greeting",
-
-    // Questions
-    "?": "question", "what": "question", "how": "question", "help": "question"
-};
-
-const analyzeInput = (text: string, currentState: ChatState): Sentiment => {
-    const lower = text.toLowerCase();
-
-    // 1. Immediate Risk Check (High Priority)
-    if (lower.match(/die|kill|suicide|chết|tự tử|không muốn sống|muốn chết|end my life/)) return "risk";
-
-    // 2. Score based on keywords
-    const scores: Record<string, number> = {};
-
-    Object.entries(KEYWORDS).forEach(([word, category]) => {
-        if (lower.includes(word)) {
-            scores[category] = (scores[category] || 0) + 1;
-        }
-    });
-
-    // 3. Determine winner
-    let bestMatch: Sentiment = "neutral";
-    let maxScore = 0;
-
-    Object.entries(scores).forEach(([cat, score]) => {
-        if (score > maxScore) {
-            maxScore = score;
-            bestMatch = cat as Sentiment;
-        }
-    });
-
-    // 4. Context fallback
-    // If no strong keywords found, but we are deep in a topic, assume continuation
-    if (maxScore === 0 && currentState.currentTopic && currentState.currentTopic !== "greeting" && currentState.currentTopic !== "neutral") {
-        // Simple heuristic: if user says "yes/no/maybe" or short sentences, keep topic
-        if (lower.length < 50 || lower.match(/yes|no|yeah|nah/)) {
-            return currentState.currentTopic;
-        }
-    }
-
-    // Default to neutral if nothing matches
-    return bestMatch;
-};
-
-const getResponse = (sentiment: Sentiment, state: ChatState): { text: string, newState: ChatState, type: "normal" | "risk" } => {
-    const nextState = { ...state, lastSentiment: sentiment, interactionCount: state.interactionCount + 1 };
-
-    // Risk Override
-    if (sentiment === "risk") {
-        return {
-            text: "I am very concerned about what you just shared. You are important. Please call a helpline immediately using the button above or dial 111/115.",
-            newState: nextState,
-            type: "risk"
-        };
-    }
-
-    // New Topic Detection
-    const isNewTopic = sentiment !== state.currentTopic;
-    if (isNewTopic && sentiment !== "neutral" && sentiment !== "question") {
-        nextState.currentTopic = sentiment;
-        nextState.interactionCount = 1; // Reset count for new topic
-    }
-
-    
-
-    // 1. Greeting
-    if (sentiment === "greeting") {
-        return {
-            text: "Hello! I'm here to support you. How are you feeling right now? (e.g., stressed, anxious, or just need to chat)",
-            newState: nextState,
-            type: "normal"
-        };
-    }
-
-    // 2. Topic-based flows
-    if (nextState.currentTopic) {
-        const topic = nextState.currentTopic;
-        const count = nextState.interactionCount;
-
-        // Flow: 1. Acknowledge -> 2. Explore -> 3. Advice -> 4. Wrap up
-        if (topic === "academic_stress") {
-            if (count === 1) return { text: "It sounds like school is weighing heavily on you. Is it a specific exam or just everything piling up?", newState: nextState, type: "normal" };
-            if (count === 2) return { text: "That is a really heavy load to carry. How have you been sleeping and eating while dealing with this?", newState: nextState, type: "normal" };
-            if (count === 3) return { text: "One thing that helps is breaking it down. What is ONE tiny thing you can finish in the next 15 minutes?", newState: nextState, type: "normal" };
-            return { text: "Remember, your grades don't define your worth. I'm here if you need to vent more.", newState: nextState, type: "normal" };
-        }
-
-        if (topic === "anxiety") {
-            if (count === 1) return { text: "I hear that you're feeling anxious. That's a really uncomfortable feeling. Can you tell me where you feel it in your body?", newState: nextState, type: "normal" };
-            if (count === 2) return { text: "It's scary when our body reacts like that. You are safe. Try to take a slow breath with me. In for 4... Out for 4...", newState: nextState, type: "normal" };
-            return { text: "Would you like to try the 'Grounding' exercise in our Exercises tab? It can really help stop the spiral.", newState: nextState, type: "normal" };
-        }
-
-        if (topic === "sadness") {
-            if (count === 1) return { text: "I'm so sorry you're feeling this way. It's okay not to be okay. Do you want to talk about what happened?", newState: nextState, type: "normal" };
-            if (count === 2) return { text: "Thank you for sharing that with me. It sounds incredibly tough. You are not alone.", newState: nextState, type: "normal" };
-            return { text: "Be gentle with yourself today. Maybe do one small thing that brings you a tiny bit of comfort, like a warm drink.", newState: nextState, type: "normal" };
-        }
-
-        if (topic === "general_stress") {
-            if (count === 1) return { text: "You sound exhausted. It seems like you've been carrying a lot lately.", newState: nextState, type: "normal" };
-            return { text: "When was the last time you took a proper break, with no screens and no demands?", newState: nextState, type: "normal" };
-        }
-
-        if (topic === "distracted") {
-            if (count === 1) return { text: "Focus is really hard sometimes. Are you finding it hard to start, or hard to keep going?", newState: nextState, type: "normal" };
-            return { text: "Sometimes we procrastinate because the task feels too big. Try 'The 5 Minute Rule' - just promise to work for 5 minutes only.", newState: nextState, type: "normal" };
-        }
-
-        if (topic === "positive") {
-            return { text: "That is wonderful to hear! It's so important to celebrate these wins. What do you think contributed to this good feeling?", newState: nextState, type: "normal" };
-        }
-    }
-
-    // 3. Fallback / Neutral / Question
-    if (sentiment === "question") {
-        return { text: "That's a good question. As an AI, I suggest looking into our 'Exercises' or 'Assessment' tabs for more specific tools. How else can I help?", newState: nextState, type: "normal" };
-    }
-
-    // Generic fallback
+function createGreetingMessage(text: string): UiChatMessage {
     return {
-        text: "I'm listening. Tell me more about that.",
-        newState: nextState,
-        type: "normal"
+        id: `local-greeting-${crypto.randomUUID()}`,
+        role: "bot",
+        text,
+        timestamp: new Date(),
+        type: "normal",
+        isSynthetic: true,
     };
-};
+}
 
 export default function ChatPage() {
     return (
         <ProtectedRoute>
             <ChatContent />
         </ProtectedRoute>
-    )
+    );
 }
 
 function ChatContent() {
-    const [messages, setMessages] = useState<Message[]>([
-        { id: "1", role: "bot", text: "Hello! I'm your learning support companion. How are you feeling about your studies today?", timestamp: new Date(), type: "normal" }
+    const { showToast } = useToast();
+    const [messages, setMessages] = useState<UiChatMessage[]>(() => [
+        createGreetingMessage(
+            "Hello! I'm your learning support companion. How are you feeling about your studies today?"
+        ),
     ]);
     const [input, setInput] = useState("");
     const [isTyping, setIsTyping] = useState(false);
     const [showHelpModal, setShowHelpModal] = useState(false);
     const [helpReason, setHelpReason] = useState<"score" | "chat" | "manual">("manual");
-    const [chatState, setChatState] = useState<ChatState>(INITIAL_STATE);
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
 
-    // Load history from DB on mount
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const streamAbortRef = useRef<AbortController | null>(null);
+
     useEffect(() => {
+        const controller = new AbortController();
+
         const fetchHistory = async () => {
             try {
-                const res = await fetch("/api/chat");
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data.messages && data.messages.length > 0) {
-                        // Ensure dates are parsed
-                        const hydrated = data.messages.map((m: { timestamp: string | number | Date }) => ({
-                            ...m,
-                            timestamp: new Date(m.timestamp)
-                        }));
-                        setMessages(hydrated);
-                    }
+                const res = await fetch("/api/chat", { signal: controller.signal });
+                if (!res.ok) return;
+
+                const data = (await res.json()) as {
+                    messages?: Array<Omit<ChatMessageDTO, "timestamp"> & { timestamp: string }>;
+                };
+                if (data.messages && data.messages.length > 0) {
+                    const hydrated: UiChatMessage[] = data.messages.map((m) => ({
+                        ...m,
+                        timestamp: new Date(m.timestamp),
+                        type: detectCrisisRisk(m.text) ? "risk" : m.type ?? "normal",
+                    }));
+                    setMessages(hydrated);
                 }
             } catch (error) {
-                console.error("Failed to load chat history:", error);
+                if ((error as Error)?.name !== "AbortError") {
+                    console.error("Failed to load chat history:", error);
+                }
             } finally {
-                setIsLoadingHistory(false);
+                if (!controller.signal.aborted) {
+                    setIsLoadingHistory(false);
+                }
             }
         };
 
-        fetchHistory();
+        void fetchHistory();
+
+        return () => {
+            controller.abort();
+            streamAbortRef.current?.abort();
+        };
     }, []);
-
-    // (Removed LocalStorage save effect - data is saved by API on send)
-
-    const scrollRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (scrollRef.current) {
@@ -243,101 +99,144 @@ function ChatContent() {
     }, [messages, isTyping]);
 
     const handleSend = async () => {
-        if (!input.trim()) return;
+        const trimmed = input.trim();
+        if (!trimmed || isTyping) return;
 
-        const userMsg: Message = { id: Date.now().toString(), role: "user", text: input, timestamp: new Date() };
-        setMessages(prev => [...prev, userMsg]);
+        const isRisk = detectCrisisRisk(trimmed);
+        const userMsg: UiChatMessage = {
+            id: crypto.randomUUID(),
+            role: "user",
+            text: trimmed,
+            timestamp: new Date(),
+            type: isRisk ? "risk" : "normal",
+        };
+
+        const historyForApi = messages
+            .filter((m) => !m.isSynthetic && m.text.trim().length > 0)
+            .slice(-MAX_CONTEXT_MESSAGES)
+            .map((m) => ({
+                role: m.role === "bot" ? ("assistant" as const) : ("user" as const),
+                content: m.text.slice(0, 4000),
+            }));
+
+        setMessages((prev) => [...prev, userMsg]);
         setInput("");
         setIsTyping(true);
 
-        const sentiment = analyzeInput(userMsg.text, chatState);
-
-        // RISK DETECTION
-        if (sentiment === "risk") {
+        if (isRisk) {
             setHelpReason("chat");
             setShowHelpModal(true);
         }
+
+        streamAbortRef.current?.abort();
+        const controller = new AbortController();
+        streamAbortRef.current = controller;
+
+        let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+        const botMsgId = crypto.randomUUID();
 
         try {
             const response = await fetch("/api/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
                 body: JSON.stringify({
-                    messages: [
-                        ...messages.map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.text })),
-                        { role: "user", content: userMsg.text }
-                    ]
-                })
+                    messages: [...historyForApi, { role: "user", content: trimmed.slice(0, 4000) }],
+                }),
             });
 
             if (!response.ok) {
-                const errData = await response.json().catch(() => ({}));
-                throw new Error(errData.error || "API Request Failed");
+                const errData = (await response.json().catch(() => ({}))) as { error?: string };
+                throw new Error(errData.error || "API request failed");
             }
 
-            if (!response.body) throw new Error("No response body");
+            if (!response.body) {
+                throw new Error("No response stream received");
+            }
 
-            
-            const botMsgId = (Date.now() + 1).toString();
-            const botMsg: Message = {
+            const botMsg: UiChatMessage = {
                 id: botMsgId,
                 role: "bot",
                 text: "",
                 timestamp: new Date(),
-                type: "normal"
+                type: isRisk ? "risk" : "normal",
             };
-            setMessages(prev => [...prev, botMsg]);
+            setMessages((prev) => [...prev, botMsg]);
 
-            // Stream Reader
-            const reader = response.body.getReader();
+            reader = response.body.getReader();
             const decoder = new TextDecoder();
-            let done = false;
 
-            while (!done) {
-                const { value, done: doneReading } = await reader.read();
-                done = doneReading;
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
                 const chunkValue = decoder.decode(value, { stream: true });
-
                 if (chunkValue) {
-                    setMessages(prev => prev.map(msg => {
-                        if (msg.id === botMsgId) {
-                            return { ...msg, text: msg.text + chunkValue };
-                        }
-                        return msg;
-                    }));
+                    setMessages((prev) =>
+                        prev.map((msg) =>
+                            msg.id === botMsgId ? { ...msg, text: msg.text + chunkValue } : msg
+                        )
+                    );
                 }
             }
-
+            const trailing = decoder.decode();
+            if (trailing) {
+                setMessages((prev) =>
+                    prev.map((msg) =>
+                        msg.id === botMsgId ? { ...msg, text: msg.text + trailing } : msg
+                    )
+                );
+            }
         } catch (error) {
-            console.error(error);
-            const errorMsg: Message = {
-                id: (Date.now() + 1).toString(),
+            if ((error as Error)?.name === "AbortError") {
+                return;
+            }
+            const errMessage =
+                error instanceof Error ? error.message : "Connection failed. Please try again.";
+            const errorMsg: UiChatMessage = {
+                id: `local-error-${crypto.randomUUID()}`,
                 role: "bot",
-                text: `Error: ${error instanceof Error ? error.message : "Connection failed"}. Please check your API usage or try again.`,
+                text: `Error: ${errMessage}. Please try again.`,
                 timestamp: new Date(),
-                type: "normal"
+                type: "normal",
+                isSynthetic: true,
             };
-            setMessages(prev => [...prev, errorMsg]);
+            setMessages((prev) => [...prev.filter((m) => m.id !== botMsgId || m.text.length > 0), errorMsg]);
         } finally {
+            try {
+                reader?.releaseLock();
+            } catch {
+                // Ignore if already unlocked
+            }
+            if (streamAbortRef.current === controller) {
+                streamAbortRef.current = null;
+            }
             setIsTyping(false);
         }
     };
 
     const resetChat = async () => {
+        streamAbortRef.current?.abort();
+        streamAbortRef.current = null;
+        setIsTyping(false);
+
         try {
-            await fetch("/api/chat", { method: "DELETE" });
-        } catch (e) {
-            console.error("Failed to clear chat from DB:", e);
+            const res = await fetch("/api/chat", { method: "DELETE" });
+            if (!res.ok) {
+                showToast("Could not clear saved chat history on the server.", "error");
+            }
+        } catch {
+            showToast("Network error while clearing chat history.", "error");
         }
-        const initialMsg: Message = { id: Date.now().toString(), role: "bot", text: "Chat history cleared. How can I help you now?", timestamp: new Date(), type: "normal" };
-        setMessages([initialMsg]);
-        setChatState(INITIAL_STATE);
+
+        setMessages([
+            createGreetingMessage("Chat history cleared. How can I help you now?"),
+        ]);
     };
 
     if (isLoadingHistory) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-background w-full">
-                <p className="text-muted-foreground animate-pulse">Loading...</p>
+                <p className="text-muted-foreground animate-pulse">Loading conversation...</p>
             </div>
         );
     }
@@ -351,37 +250,42 @@ function ChatContent() {
             />
 
             <Card className="w-full max-w-3xl h-[85dvh] flex flex-col glass-card relative overflow-hidden">
-                <CardHeader className="border-b border-white/10 relative z-10 flex flex-row items-center justify-between">
+                <CardHeader className="border-b border-white/10 relative z-10 flex flex-row items-center justify-between gap-2">
                     <CardTitle className="flex items-center gap-2">
-                        <Bot className="w-6 h-6 text-primary" />
+                        <Bot className="w-6 h-6 text-primary" aria-hidden="true" />
                         AI Support Assistant
                     </CardTitle>
                     <div className="flex gap-2">
                         <Button
                             variant="ghost"
                             size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                            onClick={resetChat}
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => void resetChat()}
                             title="Clear Chat History"
+                            aria-label="Clear chat history"
                         >
-                            <RotateCcw className="w-4 h-4" />
+                            <RotateCcw className="w-4 h-4" aria-hidden="true" />
                         </Button>
                         <Button
                             variant="destructive"
                             size="sm"
-                            className="text-xs h-7 gap-1"
+                            className="text-xs h-8 gap-1"
                             onClick={() => {
                                 setHelpReason("manual");
                                 setShowHelpModal(true);
                             }}
                         >
-                            <PhoneCall className="w-3 h-3" /> I need support
+                            <PhoneCall className="w-3 h-3" aria-hidden="true" /> I need support
                         </Button>
                     </div>
                 </CardHeader>
+
                 <CardContent className="flex-1 overflow-hidden p-0 relative z-10">
                     <div
                         ref={scrollRef}
+                        role="log"
+                        aria-live="polite"
+                        aria-label="Chat messages"
                         className="h-full overflow-y-auto p-4 space-y-4 scroll-smooth"
                     >
                         {messages.map((msg) => (
@@ -392,39 +296,65 @@ function ChatContent() {
                                     msg.role === "user" ? "justify-end" : "justify-start"
                                 )}
                             >
-                                <div className={cn(
-                                    "flex max-w-[85%] gap-3",
-                                    msg.role === "user" ? "flex-row-reverse" : "flex-row"
-                                )}>
-                                    <div className={cn(
-                                        "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
-                                        msg.role === "user" ? "bg-primary text-primary-foreground" :
-                                            msg.type === "risk" ? "bg-red-500 text-primary-foreground" : "bg-secondary text-secondary-foreground"
-                                    )}>
-                                        {msg.role === "user" ? <User className="w-5 h-5" /> :
-                                            msg.type === "risk" ? <PhoneCall className="w-5 h-5" /> : <Bot className="w-5 h-5" />}
+                                <div
+                                    className={cn(
+                                        "flex max-w-[85%] gap-3",
+                                        msg.role === "user" ? "flex-row-reverse" : "flex-row"
+                                    )}
+                                >
+                                    <div
+                                        aria-hidden="true"
+                                        className={cn(
+                                            "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
+                                            msg.role === "user"
+                                                ? "bg-primary text-primary-foreground"
+                                                : msg.type === "risk"
+                                                    ? "bg-red-500 text-primary-foreground"
+                                                    : "bg-secondary text-secondary-foreground"
+                                        )}
+                                    >
+                                        {msg.role === "user" ? (
+                                            <User className="w-5 h-5" />
+                                        ) : msg.type === "risk" ? (
+                                            <PhoneCall className="w-5 h-5" />
+                                        ) : (
+                                            <Bot className="w-5 h-5" />
+                                        )}
                                     </div>
                                     <div className="flex flex-col gap-1">
-                                        <div className={cn(
-                                            "p-4 rounded-2xl shadow-sm text-sm leading-relaxed overflow-hidden",
-                                            msg.role === "user"
-                                                ? "bg-primary/20 text-foreground rounded-tr-none border border-primary/20"
-                                                : msg.type === "risk"
-                                                    ? "bg-red-500/10 text-red-600 dark:text-red-200 border border-red-500/50 rounded-tl-none"
-                                                    : "bg-black/5 dark:bg-white/10 backdrop-blur-md rounded-tl-none border border-black/10 dark:border-white/20"
-                                        )}>
+                                        <div
+                                            className={cn(
+                                                "p-4 rounded-2xl shadow-sm text-sm leading-relaxed overflow-hidden",
+                                                msg.role === "user"
+                                                    ? "bg-primary/20 text-foreground rounded-tr-none border border-primary/20"
+                                                    : msg.type === "risk"
+                                                        ? "bg-red-500/10 text-red-700 dark:text-red-200 border border-red-500/50 rounded-tl-none"
+                                                        : "bg-black/5 dark:bg-white/10 backdrop-blur-md rounded-tl-none border border-black/10 dark:border-white/20"
+                                            )}
+                                        >
                                             <div className="prose dark:prose-invert prose-sm max-w-none break-words">
                                                 <ReactMarkdown
+                                                    remarkPlugins={[remarkGfm]}
                                                     components={{
-                                                        p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+                                                        p: ({ ...props }) => (
+                                                            <p className="mb-2 last:mb-0" {...props} />
+                                                        ),
+                                                        a: ({ ...props }) => (
+                                                            <a
+                                                                {...props}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                className="underline text-primary"
+                                                            />
+                                                        ),
                                                     }}
                                                 >
                                                     {msg.text}
                                                 </ReactMarkdown>
                                             </div>
                                         </div>
-                                        {msg.type === "risk" && (
-                                            <div className="text-xs text-red-400 pl-2">
+                                        {msg.type === "risk" && msg.role === "bot" && (
+                                            <div className="text-xs text-red-500 dark:text-red-400 pl-2 font-medium">
                                                 Hotline: 111 (Child Helpline) or 115
                                             </div>
                                         )}
@@ -432,11 +362,12 @@ function ChatContent() {
                                 </div>
                             </div>
                         ))}
+
                         {isTyping && (
-                            <div className="flex justify-start w-full">
+                            <div className="flex justify-start w-full" aria-label="Assistant is typing">
                                 <div className="flex max-w-[80%] gap-3">
                                     <div className="w-8 h-8 rounded-full bg-secondary text-secondary-foreground flex items-center justify-center shrink-0">
-                                        <Bot className="w-5 h-5" />
+                                        <Bot className="w-5 h-5" aria-hidden="true" />
                                     </div>
                                     <div className="bg-black/5 dark:bg-white/10 p-4 rounded-2xl rounded-tl-none border border-black/10 dark:border-white/20 flex gap-1 items-center h-12">
                                         <span className="w-2 h-2 bg-foreground/50 rounded-full animate-bounce" />
@@ -448,19 +379,34 @@ function ChatContent() {
                         )}
                     </div>
                 </CardContent>
+
                 <CardFooter className="p-4 border-t border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 relative z-10">
-                    <div className="flex w-full gap-2">
+                    <form
+                        className="flex w-full gap-2"
+                        onSubmit={(e) => {
+                            e.preventDefault();
+                            void handleSend();
+                        }}
+                    >
                         <input
-                            className="flex h-12 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                            aria-label="Chat message"
+                            className="flex h-12 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                             placeholder="Type your message..."
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
-                            onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                            disabled={isTyping}
+                            maxLength={4000}
                         />
-                        <Button onClick={handleSend} size="icon" className="h-12 w-12 rounded-lg">
-                            <Send className="w-5 h-5" />
+                        <Button
+                            type="submit"
+                            size="icon"
+                            className="h-12 w-12 rounded-lg"
+                            disabled={isTyping || !input.trim()}
+                            aria-label="Send message"
+                        >
+                            <Send className="w-5 h-5" aria-hidden="true" />
                         </Button>
-                    </div>
+                    </form>
                 </CardFooter>
             </Card>
         </div>
