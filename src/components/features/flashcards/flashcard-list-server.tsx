@@ -1,26 +1,51 @@
+import { redirect } from "next/navigation";
+import { FlashcardSystem } from "@/components/features/flashcard-system";
 import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/session";
-import { FlashcardSystem } from "@/components/features/flashcard-system";
-import { redirect } from "next/navigation";
+import type { FlashcardDeckDTO } from "@/types";
 
 export async function FlashcardListServer() {
     const session = await getSession();
-    if (!session || !session.user) {
+    if (!session?.user?.id) {
         redirect("/login");
     }
 
-    // Artificial delay to demonstrate streaming (optional, remove in prod)
-    // await new Promise(resolve => setTimeout(resolve, 1000));
+    const dbUser = await prisma.user
+        .findUnique({
+            where: { id: session.user.id },
+            select: { id: true, tokenVersion: true },
+        })
+        .catch(() => null);
+
+    if (!dbUser || dbUser.tokenVersion !== session.user.tokenVersion) {
+        redirect("/login");
+    }
 
     const rawDecks = await prisma.flashcardDeck.findMany({
-        where: { userId: session.user.id },
-        include: { cards: true },
-        orderBy: { createdAt: 'desc' }
+        where: { userId: dbUser.id },
+        select: {
+            id: true,
+            title: true,
+            description: true,
+            color: true,
+            cards: {
+                select: {
+                    id: true,
+                    front: true,
+                    back: true,
+                },
+                orderBy: { createdAt: "asc" },
+            },
+        },
+        orderBy: { createdAt: "desc" },
     });
 
-    const decks = rawDecks.map(deck => ({
-        ...deck,
-        description: deck.description || undefined
+    const decks: FlashcardDeckDTO[] = rawDecks.map((deck) => ({
+        id: deck.id,
+        title: deck.title,
+        description: deck.description || undefined,
+        color: deck.color,
+        cards: deck.cards,
     }));
 
     return <FlashcardSystem initialDecks={decks} />;
