@@ -1,58 +1,100 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { format, getDay, parse, startOfWeek } from "date-fns";
+import { enUS } from "date-fns/locale";
+import { Calendar as BigCalendar, dateFnsLocalizer, type EventProps } from "react-big-calendar";
+import withDragAndDrop, {
+    type EventInteractionArgs,
+} from "react-big-calendar/lib/addons/dragAndDrop";
+import { Calendar, Plus, RotateCcw, Trash2 } from "lucide-react";
+import ProtectedRoute from "@/components/layout/protected-route";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+    Card,
+    CardContent,
+    CardDescription,
+    CardHeader,
+    CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Calendar, Clock, Plus, Trash2, ArrowRight, Save, RotateCcw } from "lucide-react";
+import { useToast } from "@/components/ui/toast";
+import {
+    DAYS_ORDER,
+    WEEKDAY_ONLY,
+    buildCalendarEvents,
+    checkSlotCollision,
+    findAvailableSlotOnDay,
+    findFirstAvailableSlot,
+    floatToTime,
+    generateWeeklySchedule,
+    isValidTimeWindow,
+} from "@/lib/scheduler/algorithm";
 import { cn } from "@/lib/utils";
-import ProtectedRoute from "@/components/layout/protected-route";
+import type {
+    AssignedSlot,
+    FixedEventDTO,
+    SchedulerCalendarEvent,
+    SchedulerTaskDTO,
+    WeekdayName,
+} from "@/types";
+import "react-big-calendar/lib/css/react-big-calendar.css";
+import "react-big-calendar/lib/addons/dragAndDrop/styles.css";
+import "./rbc-dark.css";
 
-// Calendar Imports
-import { Calendar as BigCalendar, momentLocalizer } from 'react-big-calendar';
-import withDragAndDrop from 'react-big-calendar/lib/addons/dragAndDrop';
-import moment from 'moment';
-// Configure moment to start week on Monday
-moment.updateLocale('en', {
-    week: { dow: 1 }
+const JS_WEEKDAYS: WeekdayName[] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+const localizer = dateFnsLocalizer({
+    format,
+    parse,
+    startOfWeek: (date: Date) => startOfWeek(date, { weekStartsOn: 1 }),
+    getDay,
+    locales: { "en-US": enUS },
 });
-import 'react-big-calendar/lib/css/react-big-calendar.css';
-import 'react-big-calendar/lib/addons/dragAndDrop/styles.css';
-import './rbc-dark.css'; // Dark mode overrides (must be AFTER library CSS)
 
-const localizer = momentLocalizer(moment);
-const DnDCalendar = withDragAndDrop(BigCalendar);
+const DnDCalendar = withDragAndDrop<SchedulerCalendarEvent>(BigCalendar);
 
-// Types
-interface FixedEvent {
-    id: string;
-    day: string; // "Monday", "Tuesday", etc.
-    startTime: string; // "08:00"
-    endTime: string; // "10:00"
-    name: string;
-}
-
-interface Task {
+interface RawTaskRow {
     id: string;
     name: string;
-    duration: number; // in hours
-    assignedSlot?: { day: string, startTime: string }; // Assigned by algorithm
-    groupId?: string;
+    duration: number;
+    groupId?: string | null;
+    scheduledDay?: string | null;
+    scheduledStartTime?: string | null;
 }
 
-interface CalendarEvent {
-    id: string;
-    title: string;
-    start: Date;
-    end: Date;
-    isFixed: boolean;
-    resourceId: string;
-    taskId?: string;
+function hydrateTask(row: RawTaskRow): SchedulerTaskDTO {
+    return {
+        id: row.id,
+        name: row.name,
+        duration: row.duration,
+        groupId: row.groupId || undefined,
+        assignedSlot:
+            row.scheduledDay && row.scheduledStartTime
+                ? { day: row.scheduledDay, startTime: row.scheduledStartTime }
+                : undefined,
+    };
 }
 
-const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const TIMES = Array.from({ length: 24 }, (_, i) => i); // 0:00 to 23:00
+function CustomCalendarEvent({ event }: EventProps<SchedulerCalendarEvent>) {
+    return (
+        <div className="flex flex-col h-full w-full overflow-hidden">
+            <div className="font-bold truncate text-[0.8rem] leading-tight">{event.title}</div>
+            <div className="text-[10px] opacity-85 leading-tight mt-0.5">
+                {format(event.start, "h:mm a")} - {format(event.end, "h:mm a")}
+            </div>
+        </div>
+    );
+}
 
 export default function SchedulerPage() {
     return (
@@ -63,503 +105,478 @@ export default function SchedulerPage() {
 }
 
 function SchedulerContent() {
-    // State
-    const [fixedEvents, setFixedEvents] = useState<FixedEvent[]>([]);
-    const [tasks, setTasks] = useState<Task[]>([]);
+    const { showToast, confirmAction } = useToast();
+
+    const [fixedEvents, setFixedEvents] = useState<FixedEventDTO[]>([]);
+    const [tasks, setTasks] = useState<SchedulerTaskDTO[]>([]);
     const [generated, setGenerated] = useState(false);
 
-    // Config values
     const [allowedStartTime, setAllowedStartTime] = useState("08:00");
     const [allowedEndTime, setAllowedEndTime] = useState("22:00");
 
-    // Form Inputs
-    const [newEvent, setNewEvent] = useState({ name: "", day: "Monday", startTime: "08:00", endTime: "10:00" });
+    const [newEvent, setNewEvent] = useState<{
+        name: string;
+        day: WeekdayName;
+        startTime: string;
+        endTime: string;
+    }>({
+        name: "",
+        day: "Monday",
+        startTime: "08:00",
+        endTime: "10:00",
+    });
     const [everydayTask, setEverydayTask] = useState({ name: "", duration: 1 });
     const [includeWeekends, setIncludeWeekends] = useState(true);
     const [normalTask, setNormalTask] = useState({ name: "", duration: 1 });
     const [isLoading, setIsLoading] = useState(true);
     const [repeatWeeks, setRepeatWeeks] = useState(4);
 
-    // Load from DB
     useEffect(() => {
+        const controller = new AbortController();
+
         const fetchData = async () => {
             try {
-                const res = await fetch("/api/scheduler");
-                if (res.ok) {
-                    const data = await res.json();
-
-                    // Hydrate Fixed Events
-                    setFixedEvents(data.fixedEvents || []);
-
-                    // Hydrate Tasks and map assignedSlot
-                    const hydratedTasks: Task[] = (data.tasks || []).map((t: { id: string; name: string; duration: number; groupId?: string; scheduledDay?: string; scheduledStartTime?: string }) => ({
-                        id: t.id,
-                        name: t.name,
-                        duration: t.duration,
-                        groupId: t.groupId,
-                        assignedSlot: (t.scheduledDay && t.scheduledStartTime)
-                            ? { day: t.scheduledDay, startTime: t.scheduledStartTime }
-                            : undefined
-                    }));
-                    setTasks(hydratedTasks);
-
-                    if (hydratedTasks.some((t: Task) => t.assignedSlot)) setGenerated(true);
+                const res = await fetch("/api/scheduler", { signal: controller.signal });
+                if (!res.ok) {
+                    showToast("Failed to load saved schedule.", "error");
+                    return;
+                }
+                const data = (await res.json()) as {
+                    fixedEvents?: FixedEventDTO[];
+                    tasks?: RawTaskRow[];
+                };
+                setFixedEvents(data.fixedEvents ?? []);
+                const hydrated = (data.tasks ?? []).map(hydrateTask);
+                setTasks(hydrated);
+                if (hydrated.some((t) => Boolean(t.assignedSlot))) {
+                    setGenerated(true);
                 }
             } catch (error) {
-                console.error("Failed to load scheduler data");
+                if ((error as Error)?.name !== "AbortError") {
+                    showToast("Network error loading scheduler data.", "error");
+                }
             } finally {
-                setIsLoading(false);
+                if (!controller.signal.aborted) {
+                    setIsLoading(false);
+                }
             }
         };
-        fetchData();
-    }, []);
+
+        void fetchData();
+        return () => controller.abort();
+    }, [showToast]);
 
     const addFixedEvent = async () => {
-        if (!newEvent.name) return;
+        const trimmedName = newEvent.name.trim();
+        if (!trimmedName) return;
+
+        if (!isValidTimeWindow(newEvent.startTime, newEvent.endTime)) {
+            showToast("Fixed event end time must be after start time.", "error");
+            return;
+        }
+
         try {
             const res = await fetch("/api/scheduler/fixed", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(newEvent)
+                body: JSON.stringify({ ...newEvent, name: trimmedName }),
             });
-            if (res.ok) {
-                const event = await res.json();
-                setFixedEvents([...fixedEvents, event]);
-                setNewEvent({ ...newEvent, name: "" });
+            const data = (await res.json().catch(() => ({}))) as FixedEventDTO & {
+                error?: string;
+            };
+
+            if (!res.ok) {
+                showToast(data.error || "Could not add fixed event.", "error");
+                return;
             }
+            setFixedEvents((prev) => [...prev, data]);
+            setNewEvent((prev) => ({ ...prev, name: "" }));
+            showToast("Fixed event added.", "success");
         } catch {
-            console.error("Failed to add fixed event");
+            showToast("Network error adding fixed event.", "error");
         }
-    };
-
-    
-    const timeToFloat = (time: string) => {
-        const [h, m] = time.split(":").map(Number);
-        return h + m / 60;
-    };
-
-    const floatToTime = (val: number) => {
-        const h = Math.floor(val);
-        const m = Math.round((val - h) * 60);
-        return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
-    };
-
-    
-    const checkCollision = (day: string, start: number, duration: number, currentFixed: FixedEvent[], currentTasks: Task[], ignoreTaskId?: string) => {
-        const end = start + duration;
-        const BUFFER = 0.25; // 15 minutes gap
-
-        // Check fixed (Strict collision + Buffer preference? Let's strict collision + buffer to be safe)
-        if (currentFixed.some(ev => {
-            if (ev.day !== day) return false;
-            const evStart = timeToFloat(ev.startTime);
-            const evEnd = timeToFloat(ev.endTime);
-            // Collision if our task (with buffer padding) overlaps event
-            // Logic: (Start < EvEnd) && (End > EvStart). 
-            // We want Gap: Start >= EvEnd + Buffer OR End <= EvStart - Buffer
-            // So Collision: Start < EvEnd + Buffer && End > EvStart - Buffer
-            return (start < evEnd + BUFFER && end > evStart - BUFFER);
-        })) return true;
-
-        // Check already placed tasks (Gap required)
-        if (currentTasks.some(t => {
-            if (t.id === ignoreTaskId) return false; // self
-            if (!t.assignedSlot) return false; // not placed
-            if (t.assignedSlot.day !== day) return false;
-            const tStart = timeToFloat(t.assignedSlot.startTime);
-            const tEnd = tStart + t.duration;
-            // Ensure 15m gap
-            return (start < tEnd + BUFFER && end > tStart - BUFFER);
-        })) return true;
-
-        return false;
-    };
-
-    const findFirstAvailableSlot = (duration: number, currentFixed: FixedEvent[], currentTasks: Task[], ignoreTaskId?: string) => {
-        const globalStartFloat = timeToFloat(allowedStartTime);
-        const globalEndFloat = timeToFloat(allowedEndTime);
-
-        for (const day of DAYS) {
-            // Step by 15 mins (0.25)
-            for (let hour = globalStartFloat; hour <= globalEndFloat - 0.25; hour += 0.25) {
-                if (hour + duration > globalEndFloat) continue;
-
-                if (!checkCollision(day, hour, duration, currentFixed, currentTasks, ignoreTaskId)) {
-                    return {
-                        day,
-                        startTime: floatToTime(hour)
-                    };
-                }
-            }
-        }
-        return undefined;
     };
 
     const addEverydayTask = async () => {
-        if (!everydayTask.name) return;
+        const trimmedName = everydayTask.name.trim();
+        if (!trimmedName) return;
 
-        const newTasksParams: { name: string; duration: number; scheduledDay: string; scheduledStartTime: string; groupId: string }[] = [];
-        const currentFixed = fixedEvents;
+        if (!isValidTimeWindow(allowedStartTime, allowedEndTime)) {
+            showToast("Allowed schedule end time must be after start time.", "error");
+            return;
+        }
+
+        const daysToSchedule = includeWeekends ? DAYS_ORDER : WEEKDAY_ONLY;
+        const groupId = crypto.randomUUID();
         const localTasksClone = [...tasks];
-        const groupId = crypto.randomUUID(); // Unique group ID for this everyday task set
-        const optimisticTasks: Task[] = []; // To store temporary tasks for optimistic UI
-        const globalStartFloat = timeToFloat(allowedStartTime);
-        const globalEndFloat = timeToFloat(allowedEndTime);
+        const optimisticTasks: SchedulerTaskDTO[] = [];
+        const newTasksParams: Array<{
+            name: string;
+            duration: number;
+            scheduledDay: string;
+            scheduledStartTime: string;
+            groupId: string;
+        }> = [];
 
-        const daysToSchedule = includeWeekends
-            ? DAYS
-            : ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+        for (const day of daysToSchedule) {
+            const slot = findAvailableSlotOnDay(
+                day,
+                everydayTask.duration,
+                allowedStartTime,
+                allowedEndTime,
+                fixedEvents,
+                localTasksClone
+            );
 
-        daysToSchedule.forEach(day => {
-            // Find slot
-            let assignedSlot = undefined;
-            // Step 15 mins
-            for (let hour = globalStartFloat; hour <= globalEndFloat - 0.25; hour += 0.25) {
-                if (hour + everydayTask.duration > globalEndFloat) continue;
-                if (!checkCollision(day, hour, everydayTask.duration, currentFixed, localTasksClone)) {
-                    assignedSlot = { day, startTime: floatToTime(hour) };
-                    break;
-                }
-            }
-
-            if (assignedSlot) {
-                const tempId = `temp-${groupId}-${day}`;
-                const tempTask: Task = {
-                    id: tempId,
-                    name: everydayTask.name,
+            if (slot) {
+                const tempTask: SchedulerTaskDTO = {
+                    id: `temp-${groupId}-${day}`,
+                    name: trimmedName,
                     duration: everydayTask.duration,
-                    assignedSlot,
-                    groupId
+                    assignedSlot: slot,
+                    groupId,
                 };
-
-                // Add to both local clone (for collision detection of remaining days) and optimistic array
                 localTasksClone.push(tempTask);
                 optimisticTasks.push(tempTask);
-
                 newTasksParams.push({
-                    name: everydayTask.name,
+                    name: trimmedName,
                     duration: everydayTask.duration,
-                    scheduledDay: assignedSlot.day,
-                    scheduledStartTime: assignedSlot.startTime,
-                    groupId
+                    scheduledDay: slot.day,
+                    scheduledStartTime: slot.startTime,
+                    groupId,
                 });
             }
-        });
+        }
 
-        // 1. Optimistic UI Update: Show immediately
-        setTasks(prev => [...prev, ...optimisticTasks]);
-        setEverydayTask({ ...everydayTask, name: "" });
+        if (newTasksParams.length === 0) {
+            showToast("No available daily time slots found within allowed hours.", "error");
+            return;
+        }
+
+        setTasks((prev) => [...prev, ...optimisticTasks]);
+        setEverydayTask((prev) => ({ ...prev, name: "" }));
         setGenerated(true);
 
-        // 2. Background API Call: Batch create
-        if (newTasksParams.length > 0) {
-            try {
-                const res = await fetch("/api/scheduler/tasks/batch-create", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ tasks: newTasksParams })
-                });
+        try {
+            const res = await fetch("/api/scheduler/tasks/batch-create", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tasks: newTasksParams }),
+            });
 
-                if (res.ok) {
-                    const createdTasks = await res.json();
-
-                    // Format the response back to client schema
-                    const hydratedTasks: Task[] = createdTasks.map((t: { id: string; name: string; duration: number; groupId?: string; scheduledDay?: string; scheduledStartTime?: string }) => ({
-                        id: t.id,
-                        name: t.name,
-                        duration: t.duration,
-                        groupId: t.groupId,
-                        assignedSlot: (t.scheduledDay && t.scheduledStartTime)
-                            ? { day: t.scheduledDay, startTime: t.scheduledStartTime }
-                            : undefined
-                    }));
-
-                    // 3. Replace optimistic temp tasks with the real DB records
-                    setTasks(prev => {
-                        // Remove the optimistic tasks for this group
-                        const filtered = prev.filter(t => t.groupId !== groupId || !t.id.startsWith("temp-"));
-                        // Add real tasks
-                        return [...filtered, ...hydratedTasks];
-                    });
-                } else {
-                    // Revert on failure
-                    console.error("Failed to create everyday tasks");
-                    setTasks(prev => prev.filter(t => t.groupId !== groupId));
-                }
-            } catch (err) {
-                console.error("Network error creating everyday tasks", err);
-                // Revert on failure
-                setTasks(prev => prev.filter(t => t.groupId !== groupId));
+            if (!res.ok) {
+                const errData = (await res.json().catch(() => ({}))) as { error?: string };
+                setTasks((prev) => prev.filter((t) => t.groupId !== groupId));
+                showToast(errData.error || "Failed to save recurring task.", "error");
+                return;
             }
+
+            const createdTasks = (await res.json()) as RawTaskRow[];
+            const hydratedTasks = createdTasks.map(hydrateTask);
+            setTasks((prev) => {
+                const withoutTemp = prev.filter(
+                    (t) => t.groupId !== groupId || !t.id.startsWith("temp-")
+                );
+                return [...withoutTemp, ...hydratedTasks];
+            });
+
+            if (hydratedTasks.length < daysToSchedule.length) {
+                showToast(
+                    `Scheduled on ${hydratedTasks.length}/${daysToSchedule.length} days due to conflicts.`,
+                    "info"
+                );
+            } else {
+                showToast("Everyday task added to schedule.", "success");
+            }
+        } catch {
+            setTasks((prev) => prev.filter((t) => t.groupId !== groupId));
+            showToast("Network error creating everyday tasks.", "error");
         }
     };
 
     const addNormalTask = async () => {
-        if (!normalTask.name) return;
+        const trimmedName = normalTask.name.trim();
+        if (!trimmedName) return;
 
-        // Auto-schedule logic
-        const slot = findFirstAvailableSlot(normalTask.duration, fixedEvents, tasks);
+        const slot = isValidTimeWindow(allowedStartTime, allowedEndTime)
+            ? findFirstAvailableSlot(
+                  normalTask.duration,
+                  allowedStartTime,
+                  allowedEndTime,
+                  fixedEvents,
+                  tasks
+              )
+            : undefined;
 
         try {
             const res = await fetch("/api/scheduler/tasks", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    name: normalTask.name,
+                    name: trimmedName,
                     duration: normalTask.duration,
                     scheduledDay: slot?.day,
-                    scheduledStartTime: slot?.startTime
-                })
+                    scheduledStartTime: slot?.startTime,
+                }),
             });
 
-            if (res.ok) {
-                const t = await res.json();
-                const hydrated = {
-                    id: t.id, name: t.name, duration: t.duration, groupId: t.groupId,
-                    assignedSlot: (t.scheduledDay && t.scheduledStartTime) ? { day: t.scheduledDay, startTime: t.scheduledStartTime } : undefined
-                };
-                setTasks([...tasks, hydrated]);
-                setNormalTask({ ...normalTask, name: "" });
-                if (slot) setGenerated(true);
+            const data = (await res.json().catch(() => ({}))) as RawTaskRow & { error?: string };
+            if (!res.ok) {
+                showToast(data.error || "Failed to add task.", "error");
+                return;
+            }
+
+            const hydrated = hydrateTask(data);
+            setTasks((prev) => [...prev, hydrated]);
+            setNormalTask((prev) => ({ ...prev, name: "" }));
+            if (slot) {
+                setGenerated(true);
+            } else {
+                showToast("Task saved, but no free slot was available in allowed hours.", "info");
             }
         } catch {
-            console.error("Failed to add normal task");
+            showToast("Network error adding task.", "error");
         }
     };
 
     const removeFixed = async (id: string) => {
         try {
-            await fetch(`/api/scheduler/fixed/${id}`, { method: "DELETE" });
-            setFixedEvents(fixedEvents.filter(e => e.id !== id));
-            // Note: We might need to re-generate or warn user that tasks might now be invalid?
-            // For now, keep it simple.
+            const res = await fetch(`/api/scheduler/fixed/${encodeURIComponent(id)}`, {
+                method: "DELETE",
+            });
+            if (!res.ok) {
+                const errData = (await res.json().catch(() => ({}))) as { error?: string };
+                showToast(errData.error || "Failed to delete fixed event.", "error");
+                return;
+            }
+            setFixedEvents((prev) => prev.filter((e) => e.id !== id));
+            showToast("Fixed event removed.", "info");
         } catch {
-            console.error("Failed to remove fixed event");
+            showToast("Network error deleting fixed event.", "error");
         }
     };
 
-    const removeTask = async (task: Task) => {
+    const removeTask = async (task: SchedulerTaskDTO) => {
         try {
-            await fetch(`/api/scheduler/tasks/${task.id}`, { method: "DELETE" });
-
-            // If it has a groupId, remove all tasks with the same groupId from state
-            if (task.groupId) {
-                setTasks(tasks.filter(t => t.groupId !== task.groupId));
-            } else {
-                setTasks(tasks.filter(t => t.id !== task.id));
+            const res = await fetch(`/api/scheduler/tasks/${encodeURIComponent(task.id)}`, {
+                method: "DELETE",
+            });
+            if (!res.ok) {
+                const errData = (await res.json().catch(() => ({}))) as { error?: string };
+                showToast(errData.error || "Failed to delete task.", "error");
+                return;
             }
+
+            setTasks((prev) =>
+                task.groupId
+                    ? prev.filter((t) => t.groupId !== task.groupId)
+                    : prev.filter((t) => t.id !== task.id)
+            );
+            showToast("Task removed.", "info");
         } catch {
-            console.error("Failed to remove task");
+            showToast("Network error removing task.", "error");
+        }
+    };
+
+    const handleResetAll = async () => {
+        const confirmed = await confirmAction({
+            title: "Clear your entire schedule?",
+            description: "All fixed events and tasks will be permanently deleted.",
+            confirmLabel: "Clear All",
+            cancelLabel: "Cancel",
+            destructive: true,
+        });
+        if (!confirmed) return;
+
+        try {
+            const res = await fetch("/api/scheduler", { method: "DELETE" });
+            if (!res.ok) {
+                showToast("Failed to reset schedule on the server.", "error");
+                return;
+            }
+            setFixedEvents([]);
+            setTasks([]);
+            setGenerated(false);
+            showToast("Schedule cleared.", "info");
+        } catch {
+            showToast("Network error resetting schedule.", "error");
         }
     };
 
     const generateSchedule = async () => {
-        // Recalculate all slots
-        const currentTasksState: Task[] = [...tasks].map(t => ({ ...t, assignedSlot: undefined }));
-
-        for (let i = 0; i < currentTasksState.length; i++) {
-            const task = currentTasksState[i];
-            const slot = findFirstAvailableSlot(task.duration, fixedEvents, currentTasksState, task.id);
-
-            if (slot) {
-                currentTasksState[i].assignedSlot = slot;
-            }
+        if (!isValidTimeWindow(allowedStartTime, allowedEndTime)) {
+            showToast("Allowed schedule end time must be after start time.", "error");
+            return;
         }
 
-        setTasks(currentTasksState);
+        const previousTasks = tasks;
+        const planned = generateWeeklySchedule(
+            tasks,
+            fixedEvents,
+            allowedStartTime,
+            allowedEndTime
+        );
+
+        setTasks(planned);
         setGenerated(true);
 
-        // Sync updates to backend
         try {
-            await fetch("/api/scheduler/tasks/batch", {
+            const res = await fetch("/api/scheduler/tasks/batch", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    updates: currentTasksState.map(t => ({
+                    updates: planned.map((t) => ({
                         id: t.id,
-                        assignedSlot: t.assignedSlot
-                    }))
-                })
+                        assignedSlot: t.assignedSlot,
+                    })),
+                }),
             });
+            if (!res.ok) {
+                setTasks(previousTasks);
+                showToast("Failed to save generated schedule.", "error");
+            } else {
+                showToast("Weekly timetable generated.", "success");
+            }
         } catch {
-            console.error("Batch update failed");
+            setTasks(previousTasks);
+            showToast("Network error saving generated schedule.", "error");
         }
     };
 
-    
-    // Helper to find date for a specific day of the week in current week
-    const getNextDateForDay = (dayName: string) => {
-        const today = new Date();
-        const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-        const targetDayIndex = days.indexOf(dayName);
-        const currentDayIndex = today.getDay();
+    const calendarEvents = useMemo(
+        () => buildCalendarEvents(fixedEvents, tasks, repeatWeeks),
+        [fixedEvents, tasks, repeatWeeks]
+    );
 
-        // Always place them in the current week starting Sunday
-        const diff = targetDayIndex - currentDayIndex;
-        const targetDate = new Date(today);
-        targetDate.setDate(today.getDate() + diff);
-        return targetDate;
-    };
+    const onEventDrop = async ({
+        event,
+        start,
+    }: EventInteractionArgs<SchedulerCalendarEvent>) => {
+        if (event.isFixed || !event.taskId) return;
 
-    const calendarEvents: CalendarEvent[] = [];
+        const targetTask = tasks.find((t) => t.id === event.taskId);
+        if (!targetTask) return;
 
-    for (let w = 0; w < repeatWeeks; w++) {
-        const weekOffset = w * 7 * 24 * 60 * 60 * 1000;
+        const dropDate = start instanceof Date ? start : new Date(start);
+        const startHours = dropDate.getHours() + dropDate.getMinutes() / 60;
+        if (startHours < 0 || startHours + targetTask.duration > 24) {
+            showToast("Task must remain within the same day (00:00 - 24:00).", "error");
+            return;
+        }
 
-        fixedEvents.forEach(fe => {
-            const date = getNextDateForDay(fe.day);
-            const [sH, sM] = fe.startTime.split(':').map(Number);
-            const [eH, eM] = fe.endTime.split(':').map(Number);
+        const newDay = JS_WEEKDAYS[dropDate.getDay()];
+        const newStartTime = floatToTime(startHours);
 
-            const start = new Date(date.getTime() + weekOffset);
-            start.setHours(sH, sM, 0, 0);
+        if (
+            checkSlotCollision(
+                newDay,
+                startHours,
+                targetTask.duration,
+                fixedEvents,
+                tasks,
+                targetTask.id
+            )
+        ) {
+            showToast("Cannot move task here — it overlaps another event or buffer.", "error");
+            return;
+        }
 
-            const end = new Date(date.getTime() + weekOffset);
-            end.setHours(eH, eM, 0, 0);
-
-            calendarEvents.push({
-                id: `${fe.id}-w${w}`,
-                title: fe.name,
-                start,
-                end,
-                isFixed: true,
-                resourceId: fe.id
-            });
-        });
-
-        tasks.filter(t => t.assignedSlot).forEach(t => {
-            const slot = t.assignedSlot!;
-            const date = getNextDateForDay(slot.day);
-
-            const startFloat = timeToFloat(slot.startTime);
-            const sH = Math.floor(startFloat);
-            const sM = Math.round((startFloat - sH) * 60);
-
-            const endFloat = startFloat + t.duration;
-            const eH = Math.floor(endFloat);
-            const eM = Math.round((endFloat - eH) * 60);
-
-            const start = new Date(date.getTime() + weekOffset);
-            start.setHours(sH, sM, 0, 0);
-
-            const end = new Date(date.getTime() + weekOffset);
-            end.setHours(eH, eM, 0, 0);
-
-            calendarEvents.push({
-                id: `${t.id}-w${w}`,
-                title: t.name,
-                start,
-                end,
-                isFixed: false,
-                resourceId: t.id,
-                taskId: t.id
-            });
-        });
-    }
-
-    const onEventDrop = async ({ event, start }: { event: CalendarEvent; start: Date; end: Date }) => {
-        if (event.isFixed) return; // Cannot move fixed events via UI simply
-
-        const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-        const newDay = days[start.getDay()];
-        const newStartTime = floatToTime(start.getHours() + (start.getMinutes() / 60));
-
-        // Optimistic Update
-        setTasks(prev => prev.map(t => {
-            if (t.id === event.taskId) {
-                return { ...t, assignedSlot: { day: newDay, startTime: newStartTime } };
-            }
-            return t;
-        }));
+        const previousSlot: AssignedSlot | undefined = targetTask.assignedSlot;
+        setTasks((prev) =>
+            prev.map((t) =>
+                t.id === targetTask.id
+                    ? { ...t, assignedSlot: { day: newDay, startTime: newStartTime } }
+                    : t
+            )
+        );
 
         try {
-            await fetch(`/api/scheduler/tasks/${event.taskId}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    scheduledDay: newDay,
-                    scheduledStartTime: newStartTime
-                })
-            });
+            const res = await fetch(
+                `/api/scheduler/tasks/${encodeURIComponent(targetTask.id)}`,
+                {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        scheduledDay: newDay,
+                        scheduledStartTime: newStartTime,
+                    }),
+                }
+            );
+            if (!res.ok) {
+                throw new Error("PATCH failed");
+            }
         } catch {
-            console.error("Failed to move event");
+            setTasks((prev) =>
+                prev.map((t) =>
+                    t.id === targetTask.id ? { ...t, assignedSlot: previousSlot } : t
+                )
+            );
+            showToast("Could not save new task position.", "error");
         }
     };
 
-    const onSelectEvent = (event: CalendarEvent) => {
-        if (window.confirm(`Are you sure you want to delete '${event.title}'?`)) {
-            if (event.isFixed) {
-                removeFixed(event.resourceId);
-            } else {
-                const taskToDelete = tasks.find(t => t.id === event.taskId);
-                if (taskToDelete) {
-                    removeTask(taskToDelete);
-                }
+    const onSelectEvent = async (event: SchedulerCalendarEvent) => {
+        const confirmed = await confirmAction({
+            title: `Remove "${event.title}"?`,
+            description: event.isFixed
+                ? "This recurring fixed commitment will be deleted."
+                : "This scheduled task will be deleted.",
+            confirmLabel: "Remove",
+            cancelLabel: "Keep",
+            destructive: true,
+        });
+        if (!confirmed) return;
+
+        if (event.isFixed) {
+            await removeFixed(event.resourceId);
+        } else {
+            const taskToDelete = tasks.find((t) => t.id === event.taskId);
+            if (taskToDelete) {
+                await removeTask(taskToDelete);
             }
         }
     };
 
     const onSelectSlot = ({ start, end }: { start: Date; end: Date }) => {
-        const h = start.getHours().toString().padStart(2, '0');
-        const m = start.getMinutes().toString().padStart(2, '0');
-        const eh = end.getHours().toString().padStart(2, '0');
-        const em = end.getMinutes().toString().padStart(2, '0');
-        const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-        const day = days[start.getDay()];
-        
-        setNewEvent(prev => ({ 
-            ...prev, 
-            day, 
-            startTime: `${h}:${m}`, 
-            endTime: `${eh}:${em}` 
+        const h = start.getHours().toString().padStart(2, "0");
+        const m = start.getMinutes().toString().padStart(2, "0");
+        const eh = end.getHours().toString().padStart(2, "0");
+        const em = end.getMinutes().toString().padStart(2, "0");
+        const day = JS_WEEKDAYS[start.getDay()];
+
+        setNewEvent((prev) => ({
+            ...prev,
+            day,
+            startTime: `${h}:${m}`,
+            endTime: `${eh}:${em}`,
         }));
-        
-        // Scroll to form if needed or just give feedback
-        const formElement = document.getElementById('fixed-schedule-form');
-        if (formElement) formElement.scrollIntoView({ behavior: 'smooth' });
+
+        const formElement = document.getElementById("fixed-schedule-form");
+        if (formElement) {
+            formElement.scrollIntoView({ behavior: "smooth" });
+        }
     };
 
-    const CustomEvent = ({ event }: { event: CalendarEvent }) => (
-        <div className="flex flex-col h-full w-full overflow-hidden">
-            <div className="font-bold truncate text-[0.8rem] leading-tight">
-                {event.title}
-            </div>
-            <div className="text-[10px] opacity-80 leading-tight mt-1">
-                {moment(event.start).format('h:mm A')} - {moment(event.end).format('h:mm A')}
-            </div>
-        </div>
-    );
-
-    // Calculate grouped tasks to avoid showing 7 tasks
-    const everydayTaskGroups = Array.from(
-        tasks.reduce((acc, task) => {
-            if (task.groupId && task.groupId !== "") {
-                if (!acc.has(task.groupId)) {
-                    acc.set(task.groupId, {
-                        ...task,
-                        daysCount: 1 // Track how many days this task appears
-                    });
-                } else {
-                    const existing = acc.get(task.groupId);
-                    existing.daysCount += 1;
-                }
+    const everydayTaskGroups = useMemo(() => {
+        const map = new Map<string, SchedulerTaskDTO & { daysCount: number }>();
+        for (const task of tasks) {
+            if (!task.groupId) continue;
+            const existing = map.get(task.groupId);
+            if (!existing) {
+                map.set(task.groupId, { ...task, daysCount: 1 });
+            } else {
+                existing.daysCount += 1;
             }
-            return acc;
-        }, new Map()).values()
-    );
+        }
+        return Array.from(map.values());
+    }, [tasks]);
 
-    // Normal tasks are tasks that don't have a 7-day pattern (for this UI simplified assumption, 
-    // we'll just say any task without a groupId or single is normal, but actually everyday tasks always get a groupId)
-    const normalTasks = tasks.filter(t => !t.groupId || t.groupId === "");
-    const groupedEverydayTasks = everydayTaskGroups.filter((g) => {
-        const task = g as Task & { daysCount: number };
-        return task.daysCount === 7 || task.id.startsWith("temp-");
-    });
+    const normalTasks = useMemo(() => tasks.filter((t) => !t.groupId), [tasks]);
 
     if (isLoading) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-background w-full">
-                <p className="text-muted-foreground animate-pulse">Loading...</p>
+                <p className="text-muted-foreground animate-pulse">Loading schedule...</p>
             </div>
         );
     }
@@ -570,128 +587,194 @@ function SchedulerContent() {
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                     <div>
                         <h1 className="text-3xl font-bold tracking-tight">Smart Scheduler</h1>
-                        <p className="text-muted-foreground">Auto-generate your perfect study week based on your free time.</p>
+                        <p className="text-muted-foreground">
+                            Auto-generate your balanced study week around fixed commitments.
+                        </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                        <div className="flex items-center h-10 rounded-md border border-input bg-background/50 px-3 py-2 text-sm">
-                            <span className="text-muted-foreground mr-2 font-medium">Loop Weeks:</span>
+                        <label className="flex items-center h-10 rounded-md border border-input bg-background/50 px-3 py-2 text-sm">
+                            <span className="text-muted-foreground mr-2 font-medium">
+                                Loop Weeks:
+                            </span>
                             <input
                                 type="number"
+                                aria-label="Repeat timetable for weeks"
                                 min={1}
                                 max={52}
                                 className="w-12 bg-transparent border-none focus:outline-none focus:ring-0 p-0 text-center text-foreground font-semibold"
                                 value={repeatWeeks}
-                                onChange={(e) => setRepeatWeeks(Math.max(1, parseInt(e.target.value) || 1))}
+                                onChange={(e) =>
+                                    setRepeatWeeks(
+                                        Math.max(1, Math.min(52, parseInt(e.target.value, 10) || 1))
+                                    )
+                                }
                             />
-                        </div>
-                        <Button variant="outline" onClick={async () => {
-                            // Clear DB
-                            await fetch("/api/scheduler", { method: "DELETE" });
-                            // Clear Local State
-                            setFixedEvents([]);
-                            setTasks([]);
-                            setGenerated(false);
-                        }}>
-                            <RotateCcw className="w-4 h-4 mr-2" /> Reset
+                        </label>
+                        <Button type="button" variant="outline" onClick={() => void handleResetAll()}>
+                            <RotateCcw className="w-4 h-4 mr-2" aria-hidden="true" /> Reset
                         </Button>
-                        <Button className="bg-primary" onClick={generateSchedule}>
-                            <Calendar className="w-4 h-4 mr-2" /> Generate
+                        <Button
+                            type="button"
+                            className="bg-primary"
+                            onClick={() => void generateSchedule()}
+                        >
+                            <Calendar className="w-4 h-4 mr-2" aria-hidden="true" /> Generate
                         </Button>
                     </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    {/* INPUT COMBINED */}
                     <div className="space-y-6 lg:col-span-1">
-                        {/* Fixed Events Input */}
                         <Card className="glass-card" id="fixed-schedule-form">
                             <CardHeader className="pb-3">
                                 <CardTitle className="text-lg">1. Fixed Schedule</CardTitle>
-                                <CardDescription>Classes, Part-time jobs, etc.</CardDescription>
+                                <CardDescription>Classes, part-time jobs, etc.</CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
                                 <div className="space-y-2">
-                                    <Label>Activity Name</Label>
+                                    <Label htmlFor="fixed-event-name">Activity Name</Label>
                                     <Input
+                                        id="fixed-event-name"
                                         placeholder="e.g. Calculus Class"
                                         value={newEvent.name}
-                                        onChange={e => setNewEvent({ ...newEvent, name: e.target.value })}
+                                        onChange={(e) =>
+                                            setNewEvent({ ...newEvent, name: e.target.value })
+                                        }
                                     />
                                 </div>
                                 <div className="space-y-3">
                                     <div className="space-y-2">
-                                        <Label>Day</Label>
+                                        <Label htmlFor="fixed-event-day">Day</Label>
                                         <select
+                                            id="fixed-event-day"
                                             className="w-full h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                             value={newEvent.day}
-                                            onChange={e => setNewEvent({ ...newEvent, day: e.target.value })}
+                                            onChange={(e) =>
+                                                setNewEvent({
+                                                    ...newEvent,
+                                                    day: e.target.value as WeekdayName,
+                                                })
+                                            }
                                         >
-                                            {DAYS.map(d => <option key={d} value={d}>{d}</option>)}
+                                            {DAYS_ORDER.map((d) => (
+                                                <option key={d} value={d}>
+                                                    {d}
+                                                </option>
+                                            ))}
                                         </select>
                                     </div>
                                     <div className="space-y-2">
                                         <Label>Time</Label>
                                         <div className="flex items-center gap-2">
                                             <Input
+                                                aria-label="Fixed event start time"
                                                 type="time"
                                                 className="flex-1 min-w-0 text-sm h-10 px-2"
                                                 value={newEvent.startTime}
-                                                onChange={e => setNewEvent({ ...newEvent, startTime: e.target.value })}
+                                                onChange={(e) =>
+                                                    setNewEvent({
+                                                        ...newEvent,
+                                                        startTime: e.target.value,
+                                                    })
+                                                }
                                             />
-                                            <span className="text-muted-foreground flex-shrink-0">–</span>
+                                            <span className="text-muted-foreground flex-shrink-0">
+                                                –
+                                            </span>
                                             <Input
+                                                aria-label="Fixed event end time"
                                                 type="time"
                                                 className="flex-1 min-w-0 text-sm h-10 px-2"
                                                 value={newEvent.endTime}
-                                                onChange={e => setNewEvent({ ...newEvent, endTime: e.target.value })}
+                                                onChange={(e) =>
+                                                    setNewEvent({
+                                                        ...newEvent,
+                                                        endTime: e.target.value,
+                                                    })
+                                                }
                                             />
                                         </div>
                                     </div>
                                 </div>
-                                <Button className="w-full" variant="secondary" onClick={addFixedEvent} disabled={!newEvent.name}>
-                                    <Plus className="w-4 h-4 mr-2" /> Add Fixed Event
+                                <Button
+                                    type="button"
+                                    className="w-full"
+                                    variant="secondary"
+                                    onClick={() => void addFixedEvent()}
+                                    disabled={!newEvent.name.trim()}
+                                >
+                                    <Plus className="w-4 h-4 mr-2" aria-hidden="true" /> Add Fixed
+                                    Event
                                 </Button>
 
-                                {/* List */}
                                 <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2">
-                                    {fixedEvents.map(ev => (
-                                        <div key={ev.id} className="flex justify-between items-center text-sm p-2 bg-secondary/10 rounded-md border border-secondary/20">
+                                    {fixedEvents.map((ev) => (
+                                        <div
+                                            key={ev.id}
+                                            className="flex justify-between items-center text-sm p-2 bg-secondary/10 rounded-md border border-secondary/20"
+                                        >
                                             <div>
-                                                <span className="font-semibold block">{ev.name}</span>
-                                                <span className="text-muted-foreground">{ev.day.slice(0, 3)} {ev.startTime}-{ev.endTime}</span>
+                                                <span className="font-semibold block">
+                                                    {ev.name}
+                                                </span>
+                                                <span className="text-muted-foreground">
+                                                    {ev.day.slice(0, 3)} {ev.startTime}-{ev.endTime}
+                                                </span>
                                             </div>
-                                            <button onClick={() => removeFixed(ev.id)} className="text-muted-foreground hover:text-red-500">
-                                                <Trash2 className="w-4 h-4" />
+                                            <button
+                                                type="button"
+                                                onClick={() => void removeFixed(ev.id)}
+                                                aria-label={`Remove fixed event ${ev.name}`}
+                                                className="text-muted-foreground hover:text-red-500"
+                                            >
+                                                <Trash2 className="w-4 h-4" aria-hidden="true" />
                                             </button>
                                         </div>
                                     ))}
-                                    {fixedEvents.length === 0 && <p className="text-xs text-center text-muted-foreground py-2">No fixed events yet.</p>}
+                                    {fixedEvents.length === 0 && (
+                                        <p className="text-xs text-center text-muted-foreground py-2">
+                                            No fixed events yet.
+                                        </p>
+                                    )}
                                 </div>
                             </CardContent>
                         </Card>
 
-                        {/* Everyday Tasks Input */}
                         <Card className="glass-card">
                             <CardHeader className="pb-3">
                                 <CardTitle className="text-lg">2. Task To Do Everyday</CardTitle>
-                                <CardDescription>Adds this activity to every day of the week.</CardDescription>
+                                <CardDescription>
+                                    Schedules a recurring daily block across your week.
+                                </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
                                 <div className="space-y-2">
-                                    <Label>Everyday Task Name</Label>
+                                    <Label htmlFor="everyday-task-name">Everyday Task Name</Label>
                                     <Input
+                                        id="everyday-task-name"
                                         placeholder="e.g. Morning Jog"
                                         value={everydayTask.name}
-                                        onChange={e => setEverydayTask({ ...everydayTask, name: e.target.value })}
+                                        onChange={(e) =>
+                                            setEverydayTask({
+                                                ...everydayTask,
+                                                name: e.target.value,
+                                            })
+                                        }
                                     />
                                 </div>
                                 <div className="space-y-2">
                                     <Label>Duration (Hours)</Label>
                                     <div className="flex gap-2">
-                                        {[1, 2, 3].map(h => (
+                                        {[1, 2, 3].map((h) => (
                                             <button
                                                 key={h}
-                                                onClick={() => setEverydayTask({ ...everydayTask, duration: h })}
+                                                type="button"
+                                                onClick={() =>
+                                                    setEverydayTask({
+                                                        ...everydayTask,
+                                                        duration: h,
+                                                    })
+                                                }
                                                 className={cn(
                                                     "flex-1 py-2 rounded-md border text-sm transition-all",
                                                     everydayTask.duration === h
@@ -712,26 +795,53 @@ function SchedulerContent() {
                                         onChange={(e) => setIncludeWeekends(e.target.checked)}
                                         className="rounded border-input bg-background w-4 h-4 text-primary focus:ring-primary"
                                     />
-                                    <Label htmlFor="weekends" className="text-sm font-normal cursor-pointer text-muted-foreground">
+                                    <Label
+                                        htmlFor="weekends"
+                                        className="text-sm font-normal cursor-pointer text-muted-foreground"
+                                    >
                                         Include Weekends (Sat-Sun)
                                     </Label>
                                 </div>
-                                <Button className="w-full" variant="secondary" onClick={addEverydayTask} disabled={!everydayTask.name}>
-                                    <Plus className="w-4 h-4 mr-2" /> Add Everyday Task
+                                <Button
+                                    type="button"
+                                    className="w-full"
+                                    variant="secondary"
+                                    onClick={() => void addEverydayTask()}
+                                    disabled={!everydayTask.name.trim()}
+                                >
+                                    <Plus className="w-4 h-4 mr-2" aria-hidden="true" /> Add
+                                    Everyday Task
                                 </Button>
 
-                                {/* EVERYDAY TASKS LIST (GROUPED) - belongs to this section */}
-                                {groupedEverydayTasks.length > 0 && (
+                                {everydayTaskGroups.length > 0 && (
                                     <div className="space-y-2 pt-3 border-t border-border">
-                                        <Label className="text-xs text-muted-foreground block">Added Everyday Tasks</Label>
-                                        {groupedEverydayTasks.map((groupTask: any) => (
-                                            <div key={groupTask.groupId} className="flex justify-between items-center text-sm p-2 bg-primary/10 rounded-md border border-primary/20">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="font-semibold text-primary">{groupTask.name}</span>
-                                                    <span className="px-1.5 py-0.5 rounded-full bg-primary/20 text-primary text-[10px]">{groupTask.duration}h/day</span>
+                                        <Label className="text-xs text-muted-foreground block">
+                                            Added Everyday Tasks
+                                        </Label>
+                                        {everydayTaskGroups.map((groupTask) => (
+                                            <div
+                                                key={groupTask.groupId}
+                                                className="flex justify-between items-center text-sm p-2 bg-primary/10 rounded-md border border-primary/20"
+                                            >
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <span className="font-semibold text-primary truncate">
+                                                        {groupTask.name}
+                                                    </span>
+                                                    <span className="px-1.5 py-0.5 rounded-full bg-primary/20 text-primary text-[10px] shrink-0">
+                                                        {groupTask.duration}h ·{" "}
+                                                        {groupTask.daysCount}d/wk
+                                                    </span>
                                                 </div>
-                                                <button onClick={() => removeTask(groupTask)} className="text-muted-foreground hover:text-red-500">
-                                                    <Trash2 className="w-4 h-4" />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void removeTask(groupTask)}
+                                                    aria-label={`Remove recurring task ${groupTask.name}`}
+                                                    className="text-muted-foreground hover:text-red-500 shrink-0"
+                                                >
+                                                    <Trash2
+                                                        className="w-4 h-4"
+                                                        aria-hidden="true"
+                                                    />
                                                 </button>
                                             </div>
                                         ))}
@@ -740,7 +850,6 @@ function SchedulerContent() {
                             </CardContent>
                         </Card>
 
-                        {/* Normal Tasks Input */}
                         <Card className="glass-card">
                             <CardHeader className="pb-3">
                                 <CardTitle className="text-lg">3. Tasks To Do</CardTitle>
@@ -748,20 +857,26 @@ function SchedulerContent() {
                             </CardHeader>
                             <CardContent className="space-y-4">
                                 <div className="space-y-2">
-                                    <Label>Task Name</Label>
+                                    <Label htmlFor="normal-task-name">Task Name</Label>
                                     <Input
+                                        id="normal-task-name"
                                         placeholder="e.g. Study Math"
                                         value={normalTask.name}
-                                        onChange={e => setNormalTask({ ...normalTask, name: e.target.value })}
+                                        onChange={(e) =>
+                                            setNormalTask({ ...normalTask, name: e.target.value })
+                                        }
                                     />
                                 </div>
                                 <div className="space-y-2">
                                     <Label>Duration (Hours)</Label>
                                     <div className="flex gap-2">
-                                        {[1, 2, 3, 4].map(h => (
+                                        {[1, 2, 3, 4].map((h) => (
                                             <button
                                                 key={h}
-                                                onClick={() => setNormalTask({ ...normalTask, duration: h })}
+                                                type="button"
+                                                onClick={() =>
+                                                    setNormalTask({ ...normalTask, duration: h })
+                                                }
                                                 className={cn(
                                                     "flex-1 py-2 rounded-md border text-sm transition-all",
                                                     normalTask.duration === h
@@ -774,195 +889,127 @@ function SchedulerContent() {
                                         ))}
                                     </div>
                                 </div>
-                                <Button className="w-full" variant="secondary" onClick={addNormalTask} disabled={!normalTask.name}>
-                                    <Plus className="w-4 h-4 mr-2" /> Add Task
+                                <Button
+                                    type="button"
+                                    className="w-full"
+                                    variant="secondary"
+                                    onClick={() => void addNormalTask()}
+                                    disabled={!normalTask.name.trim()}
+                                >
+                                    <Plus className="w-4 h-4 mr-2" aria-hidden="true" /> Add Task
                                 </Button>
 
-                                {/* Normal Task List */}
                                 <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2 border-t border-border pt-3">
-                                    <Label className="text-xs text-muted-foreground mb-2 block">Individual Tasks</Label>
-                                    {normalTasks.map(t => (
-                                        <div key={t.id} className={cn(
-                                            "flex justify-between items-center text-sm p-2 rounded-md border",
-                                            t.assignedSlot
-                                                ? "bg-secondary/10 border-secondary/20"
-                                                : "bg-red-500/10 border-red-500/20"
-                                        )}>
+                                    <Label className="text-xs text-muted-foreground mb-2 block">
+                                        Individual Tasks
+                                    </Label>
+                                    {normalTasks.map((t) => (
+                                        <div
+                                            key={t.id}
+                                            className={cn(
+                                                "flex justify-between items-center text-sm p-2 rounded-md border",
+                                                t.assignedSlot
+                                                    ? "bg-secondary/10 border-secondary/20"
+                                                    : "bg-red-500/10 border-red-500/20"
+                                            )}
+                                        >
                                             <div className="flex flex-col">
                                                 <div className="flex items-center">
                                                     <span className="font-semibold">{t.name}</span>
-                                                    <span className="ml-2 px-1.5 py-0.5 rounded-full bg-primary/10 text-primary text-xs">{t.duration}h</span>
+                                                    <span className="ml-2 px-1.5 py-0.5 rounded-full bg-primary/10 text-primary text-xs">
+                                                        {t.duration}h
+                                                    </span>
                                                 </div>
-                                                {!t.assignedSlot && <span className="text-[10px] text-red-400">Not scheduled (no space)</span>}
+                                                {!t.assignedSlot && (
+                                                    <span className="text-[10px] text-red-400">
+                                                        Not scheduled (no space)
+                                                    </span>
+                                                )}
                                             </div>
-                                            <button onClick={() => removeTask(t)} className="text-muted-foreground hover:text-red-500">
-                                                <Trash2 className="w-4 h-4" />
+                                            <button
+                                                type="button"
+                                                onClick={() => void removeTask(t)}
+                                                aria-label={`Remove task ${t.name}`}
+                                                className="text-muted-foreground hover:text-red-500"
+                                            >
+                                                <Trash2 className="w-4 h-4" aria-hidden="true" />
                                             </button>
                                         </div>
                                     ))}
-                                    {tasks.length === 0 && <p className="text-xs text-center text-muted-foreground py-2">No tasks added.</p>}
+                                    {normalTasks.length === 0 && (
+                                        <p className="text-xs text-center text-muted-foreground py-2">
+                                            No individual tasks added.
+                                        </p>
+                                    )}
                                 </div>
                             </CardContent>
                         </Card>
                     </div>
 
-                    {/* CALENDAR VISUALIZATION */}
                     <div className="lg:col-span-2">
                         <Card className="glass-card h-full min-h-[600px] flex flex-col">
-                            <CardHeader className="pb-4">
-                                <CardTitle>Weekly Timetable</CardTitle>
-                                <CardDescription>
-                                    {generated ? "Here is your optimized schedule. You can drag and drop items to adjust." : "Add events and click Generate to see the plan."}
-                                    <div className="flex items-center gap-4 mt-4 bg-secondary/20 p-2 rounded-md border text-sm">
-                                        <div className="font-semibold text-primary">Auto-Schedule Allowed Hours:</div>
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                type="time"
-                                                value={allowedStartTime}
-                                                onChange={e => setAllowedStartTime(e.target.value)}
-                                                className="h-8 w-24 px-2"
-                                            />
-                                            <span>to</span>
-                                            <Input
-                                                type="time"
-                                                value={allowedEndTime}
-                                                onChange={e => setAllowedEndTime(e.target.value)}
-                                                className="h-8 w-24 px-2"
-                                            />
-                                        </div>
+                            <CardHeader className="pb-4 space-y-3">
+                                <div>
+                                    <CardTitle>Weekly Timetable</CardTitle>
+                                    <CardDescription className="mt-1">
+                                        {generated
+                                            ? "Here is your optimized schedule. Drag and drop tasks to adjust, or click any block to remove it."
+                                            : "Add events and click Generate to build your plan."}
+                                    </CardDescription>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-3 bg-secondary/20 p-2.5 rounded-md border text-sm">
+                                    <div className="font-semibold text-primary">
+                                        Auto-Schedule Allowed Hours:
                                     </div>
-                                </CardDescription>
+                                    <div className="flex items-center gap-2">
+                                        <Input
+                                            aria-label="Allowed schedule start time"
+                                            type="time"
+                                            value={allowedStartTime}
+                                            onChange={(e) => setAllowedStartTime(e.target.value)}
+                                            className="h-8 w-28 px-2"
+                                        />
+                                        <span className="text-muted-foreground">to</span>
+                                        <Input
+                                            aria-label="Allowed schedule end time"
+                                            type="time"
+                                            value={allowedEndTime}
+                                            onChange={(e) => setAllowedEndTime(e.target.value)}
+                                            className="h-8 w-28 px-2"
+                                        />
+                                    </div>
+                                </div>
                             </CardHeader>
                             <CardContent className="flex-1 overflow-x-auto p-0 md:p-6 pb-6">
                                 <div className="h-[900px] w-full min-w-[600px] rounded-md overflow-hidden bg-background">
-                                    <style>{`
-                                        /* Customizing Big Calendar for Dark/Light Mode */
-                                        .rbc-calendar {
-                                            font-family: inherit;
-                                            color: hsl(var(--foreground));
-                                            border-color: hsl(var(--border));
-                                            min-height: 900px;
-                                        }
-                                        .rbc-time-view {
-                                            border-color: hsl(var(--border));
-                                            border-radius: 0.5rem;
-                                            overflow: hidden;
-                                            flex: 1;
-                                        }
-                                        .rbc-time-header-content {
-                                            border-left-color: hsl(var(--border));
-                                            color: hsl(var(--foreground));
-                                        }
-                                        .rbc-header {
-                                            border-bottom-color: hsl(var(--border));
-                                            color: hsl(var(--foreground));
-                                            padding: 10px 0;
-                                            font-weight: 600;
-                                            font-size: 0.8rem;
-                                            text-transform: uppercase;
-                                            letter-spacing: 0.05em;
-                                        }
-                                        .rbc-header + .rbc-header {
-                                            border-left-color: hsl(var(--border));
-                                        }
-                                        .rbc-day-bg {
-                                            border-left-color: color-mix(in srgb, hsl(var(--border)) 50%, transparent);
-                                        }
-                                        .rbc-time-slot {
-                                            border-top: 1px dashed color-mix(in srgb, hsl(var(--border)) 30%, transparent);
-                                        }
-                                        .rbc-timeslot-group {
-                                            border-bottom-color: color-mix(in srgb, hsl(var(--border)) 30%, transparent);
-                                            min-height: 70px; /* INCREASED again to ensure 2 lines of text + time fits */
-                                        }
-                                        .rbc-event {
-                                            border: none;
-                                            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
-                                            padding: 0 !important; /* Managed by CustomEvent now */
-                                            display: flex;
-                                            flex-direction: column;
-                                            overflow: visible !important;
-                                        }
-                                        .rbc-event-content {
-                                            overflow: visible !important;
-                                            padding: 4px 8px;
-                                        }
-                                        .rbc-event-label {
-                                            display: none !important;
-                                        }
-                                        .rbc-today {
-                                            background-color: color-mix(in srgb, hsl(var(--primary)) 5%, transparent);
-                                        }
-                                        .rbc-event-content {
-                                            font-size: 0.85rem;
-                                            font-weight: 600;
-                                            line-height: 1.2;
-                                            word-break: break-word;
-                                            white-space: normal;
-                                            overflow: visible;
-                                        }
-                                        .rbc-current-time-indicator {
-                                            background-color: hsl(var(--primary));
-                                            height: 2px;
-                                        }
-                                        .rbc-time-content {
-                                            border-top: none;
-                                        }
-                                        .rbc-time-content > * + * > * {
-                                            border-left-color: color-mix(in srgb, hsl(var(--border)) 50%, transparent);
-                                        }
-                                        .rbc-time-gutter .rbc-timeslot-group {
-                                            border-right-color: color-mix(in srgb, hsl(var(--border)) 50%, transparent);
-                                            border-bottom-color: transparent;
-                                        }
-                                        .rbc-label {
-                                            font-size: 0.7rem;
-                                            color: hsl(var(--muted-foreground));
-                                            padding: 0 4px;
-                                        }
-                                        .rbc-toolbar button {
-                                            color: hsl(var(--foreground));
-                                            border-color: hsl(var(--border));
-                                        }
-                                        .rbc-toolbar button:active,
-                                        .rbc-toolbar button.rbc-active {
-                                            background-image: none;
-                                            background-color: hsl(var(--primary));
-                                            border-color: hsl(var(--primary));
-                                            color: hsl(var(--primary-foreground));
-                                            box-shadow: none;
-                                        }
-                                        .rbc-toolbar button:hover:not(.rbc-active) {
-                                            background-color: hsl(var(--border));
-                                        }
-                                    `}</style>
                                     <DnDCalendar
                                         localizer={localizer}
                                         events={calendarEvents}
                                         defaultView="week"
-                                        views={['week', 'day']}
+                                        views={["week", "day"]}
                                         step={15}
                                         timeslots={4}
-                                        onEventDrop={onEventDrop}
-                                        onEventResize={() => { }} // Could be implemented later
+                                        onEventDrop={(args) => void onEventDrop(args)}
                                         resizable={false}
-                                        draggableAccessor={(event: any) => !event.isFixed}
-                                        onSelectEvent={onSelectEvent}
+                                        draggableAccessor={(event) => !event.isFixed}
+                                        onSelectEvent={(event) => void onSelectEvent(event)}
                                         onSelectSlot={onSelectSlot}
                                         selectable
                                         components={{
-                                            event: CustomEvent
+                                            event: CustomCalendarEvent,
                                         }}
-                                        eventPropGetter={(event: any) => ({
+                                        eventPropGetter={(event) => ({
                                             style: {
-                                                backgroundColor: event.isFixed ? '#f43f5e' : '#3b82f6', // rose-500 / blue-500
-                                                color: 'white',
-                                                borderRadius: '6px',
-                                                border: '1px solid rgba(255,255,255,0.2)',
-                                                padding: '2px 4px'
-                                            }
+                                                backgroundColor: event.isFixed
+                                                    ? "#f43f5e"
+                                                    : "#3b82f6",
+                                                color: "white",
+                                                borderRadius: "6px",
+                                                border: "1px solid rgba(255,255,255,0.2)",
+                                                padding: "2px 4px",
+                                            },
                                         })}
-                                        toolbar={true}
+                                        toolbar
                                     />
                                 </div>
                             </CardContent>
@@ -970,6 +1017,6 @@ function SchedulerContent() {
                     </div>
                 </div>
             </div>
-        </div >
+        </div>
     );
 }
