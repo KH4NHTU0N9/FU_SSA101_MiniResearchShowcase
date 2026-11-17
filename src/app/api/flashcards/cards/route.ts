@@ -1,44 +1,39 @@
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-import { NextResponse } from 'next/server';
-import { getSession } from "@/lib/session";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { handlePrismaError, jsonError, parseJsonBody, requireAuth } from "@/lib/api/response";
+import { createCardSchema } from "@/lib/validation";
 
-// POST: Add card to a deck
 export async function POST(req: Request) {
     try {
-        const session = await getSession();
-        if (!session || !session.user?.id) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
-        const { deckId, front, back } = await req.json();
+        const parsed = await parseJsonBody(req, createCardSchema);
+        if (parsed.error) return parsed.error;
 
-        if (!deckId || !front || !back) {
-            return NextResponse.json({ error: "Missing fields" }, { status: 400 });
-        }
+        const { deckId, front, back } = parsed.data;
 
-        // Verify deck ownership
         const deck = await prisma.flashcardDeck.findUnique({
-            where: { id: deckId }
+            where: { id: deckId },
+            select: { id: true, userId: true },
         });
 
-        if (!deck || deck.userId !== session.user.id) {
-            return NextResponse.json({ error: "Deck not found" }, { status: 404 });
+        if (!deck) {
+            return jsonError("Deck not found", 404);
+        }
+
+        if (deck.userId !== auth.ctx.user.id) {
+            return jsonError("Forbidden", 403);
         }
 
         const card = await prisma.flashcard.create({
-            data: {
-                deckId,
-                front,
-                back
-            }
+            data: { deckId, front, back },
         });
 
-        return NextResponse.json(card);
-
+        return NextResponse.json(card, { status: 201 });
     } catch (error) {
-        console.error("Create Card Error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "flashcards/cards POST");
     }
 }
