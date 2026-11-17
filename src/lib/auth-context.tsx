@@ -1,110 +1,174 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-
-interface User {
-    id: string;
-    name: string;
-    email: string;
-}
+import type { AuthActionResult, PublicUser } from "@/types";
 
 interface AuthContextType {
-    user: User | null;
-    login: (identifier: string, password: string) => Promise<boolean>;
-    register: (name: string, email: string, phone: string, password: string) => Promise<{ success: boolean; error?: string; requireVerification?: boolean }>;
+    user: PublicUser | null;
+    login: (identifier: string, password: string) => Promise<AuthActionResult>;
+    register: (
+        name: string,
+        email: string,
+        phone: string,
+        password: string
+    ) => Promise<AuthActionResult & { email?: string }>;
     logout: () => Promise<void>;
+    refreshUser: () => Promise<void>;
     isAuthenticated: boolean;
     loading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const STALE_STORAGE_KEYS = [
+    "chat_history",
+    "psych-flashcards",
+    "scheduler_fixed",
+    "scheduler_tasks",
+    "forumPosts_clean",
+    "cbtJournal",
+];
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-    const [user, setUser] = useState<User | null>(null);
+    const [user, setUser] = useState<PublicUser | null>(null);
     const [loading, setLoading] = useState(true);
     const router = useRouter();
 
-    useEffect(() => {
-        // Check session from API
-        const checkSession = async () => {
-            try {
-                const res = await fetch("/api/auth/me");
-                const data = await res.json();
-                if (data.user) {
-                    setUser(data.user);
-                }
-            } catch (err) {
-                console.error("Session check failed", err);
-            } finally {
-                setLoading(false);
+    const refreshUser = useCallback(async (signal?: AbortSignal) => {
+        try {
+            const res = await fetch("/api/auth/me", { signal, cache: "no-store" });
+            if (!res.ok) {
+                setUser(null);
+                return;
             }
-        };
-        checkSession();
+            const data = (await res.json()) as { user?: PublicUser | null };
+            setUser(data.user ?? null);
+        } catch (err) {
+            if ((err as Error).name !== "AbortError") {
+                console.error("Session check failed:", err);
+                setUser(null);
+            }
+        }
     }, []);
 
-    const login = async (identifier: string, password: string): Promise<boolean> => {
-        try {
-            const res = await fetch("/api/auth/login", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ identifier, password }),
-            });
-
-            if (!res.ok) return false;
-
-            const data = await res.json();
-            setUser(data.user);
-            router.push("/dashboard");
-            return true;
-        } catch {
-            return false;
-        }
-    };
-
-    const register = async (name: string, email: string, phone: string, password: string): Promise<{ success: boolean; error?: string; requireVerification?: boolean }> => {
-        try {
-            const res = await fetch("/api/auth/register", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name, email, phone, password }),
-            });
-
-            const data = await res.json();
-
-            if (!res.ok) {
-                return { success: false, error: data.error || "Registration failed" };
+    useEffect(() => {
+        const controller = new AbortController();
+        refreshUser(controller.signal).finally(() => {
+            if (!controller.signal.aborted) {
+                setLoading(false);
             }
+        });
+        return () => controller.abort();
+    }, [refreshUser]);
 
-            if (data.requireVerification) {
-                return { success: true, requireVerification: true };
-            }
+    const login = useCallback(
+        async (identifier: string, password: string): Promise<AuthActionResult> => {
+            try {
+                const res = await fetch("/api/auth/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ identifier, password }),
+                });
 
-            if (data.user) {
+                const data = (await res.json().catch(() => ({}))) as {
+                    user?: PublicUser;
+                    error?: string;
+                };
+
+                if (!res.ok || !data.user) {
+                    return { success: false, error: data.error || "Invalid credentials" };
+                }
+
                 setUser(data.user);
                 router.push("/dashboard");
+                router.refresh();
+                return { success: true };
+            } catch {
+                return { success: false, error: "Network error. Please try again." };
             }
-            return { success: true };
-        } catch {
-            return { success: false, error: "Network error" };
-        }
-    };
+        },
+        [router]
+    );
 
-    const logout = async () => {
+    const register = useCallback(
+        async (
+            name: string,
+            email: string,
+            phone: string,
+            password: string
+        ): Promise<AuthActionResult & { email?: string }> => {
+            try {
+                const res = await fetch("/api/auth/register", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, email, phone, password }),
+                });
+
+                const data = (await res.json().catch(() => ({}))) as {
+                    error?: string;
+                    requireVerification?: boolean;
+                    email?: string;
+                    user?: PublicUser;
+                };
+
+                if (!res.ok) {
+                    return { success: false, error: data.error || "Registration failed" };
+                }
+
+                if (data.requireVerification) {
+                    return {
+                        success: true,
+                        requireVerification: true,
+                        email: data.email || email.trim().toLowerCase(),
+                    };
+                }
+
+                if (data.user) {
+                    setUser(data.user);
+                    router.push("/dashboard");
+                    router.refresh();
+                }
+
+                return { success: true };
+            } catch {
+                return { success: false, error: "Network error" };
+            }
+        },
+        [router]
+    );
+
+    const logout = useCallback(async () => {
         try {
             await fetch("/api/auth/logout", { method: "POST" });
+        } catch (err) {
+            console.error("Logout request failed:", err);
+        } finally {
+            try {
+                STALE_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+            } catch {
+                // Ignore storage unavailability
+            }
             setUser(null);
             router.push("/login");
-        } catch (e) {
-            console.error("Logout failed", e);
+            router.refresh();
         }
-    };
+    }, [router]);
 
-    return (
-        <AuthContext.Provider value={{ user, login, register, logout, isAuthenticated: !!user, loading }}>
-            {children}
-        </AuthContext.Provider>
+    const value = useMemo(
+        () => ({
+            user,
+            login,
+            register,
+            logout,
+            refreshUser: () => refreshUser(),
+            isAuthenticated: !!user,
+            loading,
+        }),
+        [user, login, register, logout, refreshUser, loading]
     );
+
+    return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {
