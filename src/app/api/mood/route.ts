@@ -1,47 +1,50 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/session";
-import { prisma } from "@/lib/prisma";
-
 export const dynamic = "force-dynamic";
 
-// GET: Fetch Mood History
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { handlePrismaError, parseJsonBody, requireAuth } from "@/lib/api/response";
+import { createMoodSchema } from "@/lib/validation";
+
 export async function GET() {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    try {
+        const auth = await requireAuth();
+        if (auth.error) return auth.error;
 
-    const logs = await prisma.moodLog.findMany({
-        where: { userId: session.user.id },
-        orderBy: { createdAt: 'desc' },
-        take: 7
-    });
+        const logs = await prisma.moodLog.findMany({
+            where: { userId: auth.ctx.user.id },
+            orderBy: { createdAt: "desc" },
+            take: 14,
+        });
 
-    return NextResponse.json(logs);
+        return NextResponse.json(logs);
+    } catch (error) {
+        return handlePrismaError(error, "mood GET");
+    }
 }
 
-// POST: Save Mood Check-in
 export async function POST(req: NextRequest) {
     try {
-        const session = await getSession();
-        if (!session) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (auth.error) return auth.error;
 
-        const body = await req.json();
+        const parsed = await parseJsonBody(req, createMoodSchema);
+        if (parsed.error) return parsed.error;
+
+        const { mood, energy, emotion, focus, note } = parsed.data;
 
         const log = await prisma.moodLog.create({
             data: {
-                userId: session.user.id,
-                mood: body.mood,
-                energy: body.energy,
-                emotion: body.emotion,
-                focus: body.focus,
-                note: body.note || ""
-            }
+                userId: auth.ctx.user.id,
+                mood,
+                energy,
+                emotion,
+                focus,
+                note,
+            },
         });
 
-        return NextResponse.json(log);
+        return NextResponse.json(log, { status: 201 });
     } catch (error) {
-        console.error("POST /api/mood error:", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return handlePrismaError(error, "mood POST");
     }
 }
