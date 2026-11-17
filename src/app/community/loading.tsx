@@ -1,11 +1,10 @@
 import { Skeleton } from "@/components/ui/skeleton";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 
 export default function Loading() {
     return (
         <div className="min-h-screen p-4 md:p-8 bg-background flex justify-center">
             <div className="max-w-4xl w-full space-y-6">
-                {/* Header Skeleton */}
                 <div className="flex flex-col md:flex-row justify-between items-center gap-4">
                     <Skeleton className="h-10 w-48 rounded-lg" />
                     <div className="flex gap-2 w-full md:w-auto overflow-hidden">
@@ -15,7 +14,6 @@ export default function Loading() {
                     </div>
                 </div>
 
-                {/* Create Post Skeleton */}
                 <Card className="border-primary/20">
                     <CardContent className="space-y-4 pt-6">
                         <Skeleton className="h-24 w-full rounded-xl" />
@@ -26,7 +24,6 @@ export default function Loading() {
                     </CardContent>
                 </Card>
 
-                {/* Posts List Skeleton */}
                 <div className="space-y-4">
                     {[1, 2, 3].map((i) => (
                         <Card key={i} className="border-border/50">
